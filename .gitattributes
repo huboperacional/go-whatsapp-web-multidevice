@@ -1,0 +1,5 @@
+# Keep shell scripts (and the Docker entrypoint) as LF so the built image can
+# exec them, even when the repo is checked out on Windows with core.autocrlf=true.
+# Without this, a CRLF shebang (#!/bin/sh\r) makes the container fail at start with
+# "exec /entrypoint.sh: no such file or directory".
+*.sh text eol=lf
