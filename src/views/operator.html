@@ -505,6 +505,10 @@
         });
     }
     window.showSuccessInfo = (message) => {
+        // The active instance is already shown in the sidebar + panel header, so the
+        // "Using device X" toast (fired on every auto-select at load) is redundant
+        // noise here and reads like a re-login. Suppress just that one.
+        if (typeof message === 'string' && message.indexOf('Using device') === 0) return;
         $('body').toast({
             position: 'bottom right',
             title: 'Success',
@@ -806,10 +810,21 @@
                 }
             } catch (e) {}
 
-            setTimeout(() => {
-                document.getElementById('app').style.display = 'block';
-                document.getElementById('splash-screen').classList.add('fade-out');
-            }, 800);
+            // Reveal as soon as the page has actually loaded (fast on cached loads),
+            // instead of a fixed 800ms wait. reveal() is idempotent; a hard fallback
+            // guarantees we never get stuck on the splash.
+            const reveal = () => {
+                const app = document.getElementById('app');
+                if (app) app.style.display = 'block';
+                const sp = document.getElementById('splash-screen');
+                if (sp) sp.classList.add('fade-out');
+            };
+            if (document.readyState === 'complete') {
+                setTimeout(reveal, 120);
+            } else {
+                window.addEventListener('load', () => setTimeout(reveal, 120));
+            }
+            setTimeout(reveal, 1500);
         },
     }).mount('#app')
 </script>
