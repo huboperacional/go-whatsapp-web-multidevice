@@ -1,0 +1,817 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <!-- Required meta tags -->
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="{{ .AppBasePath }}/assets/gowa.svg" type="image/svg+xml" sizes="any">
+    <!-- Same stack as index.html: Fomantic UI 2.8.8, jQuery, DataTables, Vue 3 (CDN), axios, moment -->
+    <link rel="stylesheet" type="text/css"
+          href="https://cdnjs.cloudflare.com/ajax/libs/fomantic-ui/2.8.8/semantic.min.css">
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.11.4/css/dataTables.semanticui.min.css">
+    <link rel="stylesheet" href="{{ .AppBasePath }}/assets/app.css">
+    <script src="https://code.jquery.com/jquery-3.1.1.min.js"></script>
+    <script src="https://cdn.datatables.net/1.11.4/js/jquery.dataTables.min.js"></script>
+    <script src="https://cdn.datatables.net/1.11.4/js/dataTables.semanticui.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fomantic-ui/2.8.8/semantic.min.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/axios@1.1.2/dist/axios.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
+    <title>WhatsApp API {{ .AppVersion }} · Operator</title>
+
+    <!--
+      Operator view (additive, opt-in). All chrome below is Fomantic + light custom CSS
+      only. It reuses the existing 52 components untouched — the sidebar drives the hidden
+      <device-manager> through its public API, and each tab renders the existing card+modal
+      components. Dark mode is scoped to this page (body.op-dark) so index.html is unaffected.
+    -->
+    <style>
+        /* ---- Operator shell (light) ---- */
+        body.operator-body {
+            background: var(--background-color) !important;
+        }
+
+        .op-topbar {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            background: var(--primary-color);
+            color: #fff;
+            padding: 14px 22px;
+            border-radius: 20px;
+            margin: 18px auto 20px;
+            max-width: 1500px;
+            box-shadow: 0 16px 34px rgba(0, 173, 216, 0.22);
+            position: relative;
+            overflow: hidden;
+        }
+        .op-topbar .op-logo {
+            width: 40px;
+            height: 40px;
+            background: #fff;
+            border-radius: 10px;
+            padding: 5px;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+            animation: float 4s ease-in-out infinite;
+        }
+        .op-topbar .op-title {
+            font-size: 1.25em;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+        }
+        .op-topbar .op-sub {
+            opacity: 0.85;
+            font-weight: 400;
+            font-size: 0.72em;
+            margin-left: 8px;
+        }
+        .op-topbar .op-spacer { flex: 1; }
+        .op-topbar .op-topbtn {
+            background: rgba(255, 255, 255, 0.16) !important;
+            color: #fff !important;
+            border-radius: 12px !important;
+            box-shadow: none !important;
+        }
+        .op-topbar .op-topbtn:hover { background: rgba(255, 255, 255, 0.28) !important; }
+
+        .op-layout {
+            display: flex;
+            gap: 18px;
+            max-width: 1500px;
+            margin: 0 auto;
+            padding: 0 12px 40px;
+            align-items: flex-start;
+        }
+        .op-sidebar {
+            width: 320px;
+            flex-shrink: 0;
+            background: var(--message-background);
+            border: 1px solid rgba(0, 173, 216, 0.12);
+            border-radius: 18px;
+            padding: 16px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+            position: sticky;
+            top: 16px;
+        }
+        .op-sidebar .op-side-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+        .op-sidebar .op-side-head h4 {
+            margin: 0;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--secondary-color);
+            font-size: 0.85em;
+        }
+        .op-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 14px; }
+        .op-chip {
+            cursor: pointer;
+            font-size: 0.72em !important;
+            border-radius: 20px !important;
+        }
+        .op-instance {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 12px;
+            border-radius: 14px;
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: all 0.18s ease;
+            margin-bottom: 6px;
+        }
+        .op-instance:hover { background: rgba(0, 173, 216, 0.06); }
+        .op-instance.active {
+            background: rgba(0, 173, 216, 0.10);
+            border-color: rgba(0, 173, 216, 0.35);
+        }
+        .op-av {
+            width: 40px;
+            height: 40px;
+            border-radius: 12px;
+            background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            flex-shrink: 0;
+            text-transform: uppercase;
+        }
+        .op-instance .op-meta { flex: 1; min-width: 0; }
+        .op-instance .op-name {
+            font-weight: 600;
+            color: var(--text-color);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .op-instance .op-num {
+            font-size: 0.8em;
+            opacity: 0.65;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .op-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+        .op-dot.online { background: #21ba45; box-shadow: 0 0 0 3px rgba(33, 186, 69, 0.15); }
+        .op-dot.qr { background: #f2a900; box-shadow: 0 0 0 3px rgba(242, 169, 0, 0.15); }
+        .op-dot.offline { background: #9aa5ab; }
+
+        .op-detail {
+            flex: 1;
+            min-width: 0;
+            background: var(--message-background);
+            border: 1px solid rgba(0, 173, 216, 0.12);
+            border-radius: 18px;
+            padding: 20px 22px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+        }
+        .op-detail.disabled { opacity: 0.55; pointer-events: none; }
+        .op-detail-head {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+            margin-bottom: 4px;
+        }
+        .op-detail-head .op-hname { font-size: 1.15em; font-weight: 700; }
+        .op-detail-head .op-hjid { font-size: 0.82em; opacity: 0.6; }
+        /* app.css forces .ui.button color:white; keep the basic delete button's icon red */
+        .op-detail-head .ui.basic.red.button {
+            background: transparent !important;
+            box-shadow: 0 0 0 1px #db2828 inset !important;
+        }
+        .op-detail-head .ui.basic.red.button i { color: #db2828 !important; }
+
+        .op-tabs {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+            margin: 16px 0 20px;
+            border-bottom: 2px solid rgba(0, 173, 216, 0.12);
+        }
+        .op-tab {
+            padding: 9px 16px;
+            cursor: pointer;
+            border-radius: 12px 12px 0 0;
+            font-weight: 600;
+            color: var(--secondary-color);
+            opacity: 0.7;
+            border-bottom: 3px solid transparent;
+            margin-bottom: -2px;
+        }
+        .op-tab:hover { opacity: 1; background: rgba(0, 173, 216, 0.05); }
+        .op-tab.active {
+            opacity: 1;
+            color: var(--primary-color);
+            border-bottom-color: var(--primary-color);
+        }
+        .op-tab .op-tab-badge { margin-left: 6px; }
+
+        .op-empty {
+            text-align: center;
+            padding: 80px 20px;
+            color: var(--secondary-color);
+        }
+        .op-empty i { font-size: 3em; margin-bottom: 12px; opacity: 0.5; }
+
+        @media (max-width: 900px) {
+            .op-layout { flex-direction: column; }
+            .op-sidebar { width: 100%; position: static; }
+        }
+
+        /* ---- Dark mode (scoped to this page only) ---- */
+        body.op-dark {
+            --background-color: #0b141a;
+            --message-background: #1f2c33;
+            --card-hover-color: #26343d;
+            --text-color: #e9edef;
+            --secondary-color: #53bdeb;
+        }
+        body.op-dark { background: #0b141a !important; color: var(--text-color) !important; }
+        body.op-dark .op-sidebar,
+        body.op-dark .op-detail { border-color: rgba(255, 255, 255, 0.08); }
+        body.op-dark .ui.card,
+        body.op-dark .ui.cards > .card,
+        body.op-dark .ui.segment {
+            background-color: #26343d !important;
+            border-color: rgba(255, 255, 255, 0.08) !important;
+        }
+        body.op-dark .ui.card .header,
+        body.op-dark .ui.card .description,
+        body.op-dark .ui.cards > .card .header,
+        body.op-dark .ui.cards > .card .description,
+        body.op-dark .ui.header,
+        body.op-dark .op-name,
+        body.op-dark p,
+        body.op-dark label,
+        body.op-dark .content { color: var(--text-color) !important; }
+        body.op-dark .ui.form input,
+        body.op-dark .ui.form textarea,
+        body.op-dark .ui.input input {
+            background: #0b141a !important;
+            color: var(--text-color) !important;
+            border-color: rgba(255, 255, 255, 0.12) !important;
+        }
+        body.op-dark .ui.modal { background-color: #1f2c33 !important; }
+        body.op-dark .ui.modal > .content { background-color: #1f2c33 !important; color: var(--text-color) !important; }
+        body.op-dark .ui.modal > .actions { background-color: #17232a !important; }
+        body.op-dark .ui.table { background: #1f2c33 !important; color: var(--text-color) !important; }
+        body.op-dark .ui.table thead th,
+        body.op-dark .ui.table td { background: #1f2c33 !important; color: var(--text-color) !important; border-color: rgba(255,255,255,0.08) !important; }
+        body.op-dark .op-instance:hover { background: rgba(83, 189, 235, 0.10); }
+        body.op-dark .op-instance.active { background: rgba(83, 189, 235, 0.16); border-color: rgba(83, 189, 235, 0.4); }
+    </style>
+</head>
+<body class="operator-body">
+<div id="splash-screen">
+    <img src="{{ .AppBasePath }}/assets/gowa.svg" alt="GoWA Logo" class="splash-icon" id="main-logo">
+    <h2 class="splash-title">WhatsApp API · Operator</h2>
+    <div class="ui active large inline loader splash-spinner"></div>
+</div>
+
+<div id="app" style="display: none;">
+    <!-- Top bar -->
+    <div class="op-topbar">
+        <img src="{{ .AppBasePath }}/assets/gowa.svg" alt="GoWA Logo" class="op-logo">
+        <span class="op-title">WhatsApp API<span class="op-sub">Operator · [[ appVersion ]]</span></span>
+        <span class="op-spacer"></span>
+        <button class="ui small button op-topbtn" @click="toggleDark">
+            <i class="icon" :class="darkMode ? 'sun' : 'moon'"></i>
+            [[ darkMode ? 'Light' : 'Dark' ]]
+        </button>
+        <a class="ui small button op-topbtn" href="{{ .AppBasePath }}/">
+            <i class="th list icon"></i> Classic UI
+        </a>
+    </div>
+
+    <div class="op-layout">
+        <!-- ============ Sidebar: instances ============ -->
+        <aside class="op-sidebar">
+            <div class="op-side-head">
+                <h4><i class="server icon"></i> Instances</h4>
+                <button class="ui mini icon button op-topbtn" style="background: var(--primary-color) !important;"
+                        @click="refreshInstances" title="Refresh">
+                    <i class="sync icon" style="margin:0;"></i>
+                </button>
+            </div>
+
+            <div class="ui small fluid icon input">
+                <input type="text" v-model="filterText" placeholder="Filter instances…">
+                <i class="search icon"></i>
+            </div>
+
+            <div class="op-chips">
+                <div class="ui label op-chip" :class="statusFilter === 'all' ? 'blue' : 'basic'"
+                     @click="statusFilter = 'all'">All [[ deviceList.length ]]</div>
+                <div class="ui label op-chip" :class="statusFilter === 'online' ? 'green' : 'basic'"
+                     @click="statusFilter = 'online'">Online [[ statusCounts.online ]]</div>
+                <div class="ui label op-chip" :class="statusFilter === 'qr' ? 'yellow' : 'basic'"
+                     @click="statusFilter = 'qr'">Needs QR [[ statusCounts.qr ]]</div>
+                <div class="ui label op-chip" :class="statusFilter === 'offline' ? 'grey' : 'basic'"
+                     @click="statusFilter = 'offline'">Offline [[ statusCounts.offline ]]</div>
+            </div>
+
+            <div v-if="filteredDevices.length">
+                <div v-for="dev in filteredDevices" :key="dev.id || dev.device"
+                     class="op-instance"
+                     :class="{ active: selectedDeviceId === (dev.id || dev.device) }"
+                     @click="selectInstance(dev.id || dev.device)">
+                    <div class="op-av">[[ avatarLetter(dev) ]]</div>
+                    <div class="op-meta">
+                        <div class="op-name">[[ dev.name || dev.id || dev.device ]]</div>
+                        <div class="op-num">[[ dev.jid ? shortJid(dev.jid) : (dev.id || dev.device) ]]</div>
+                    </div>
+                    <div class="op-dot" :class="statusOf(dev)"></div>
+                </div>
+            </div>
+            <div class="ui message" v-else>
+                <p v-if="deviceList.length">No instances match the filter.</p>
+                <p v-else>No instances yet. Add one to begin.</p>
+            </div>
+
+            <button class="ui fluid primary button" style="margin-top: 12px;"
+                    :class="{ loading: isAdding }" @click="addInstance">
+                <i class="plus icon"></i> Add instance
+            </button>
+        </aside>
+
+        <!-- ============ Detail panel ============ -->
+        <section class="op-detail" :class="{ disabled: !selectedDeviceId }">
+            <div v-if="selectedDeviceId">
+                <!-- Header -->
+                <div class="op-detail-head">
+                    <div class="op-av" style="width:48px;height:48px;">[[ avatarLetter(selectedDevice || {}) ]]</div>
+                    <div style="flex:1;min-width:0;">
+                        <div class="op-hname">[[ (selectedDevice && (selectedDevice.name || selectedDevice.id || selectedDevice.device)) || selectedDeviceId ]]</div>
+                        <div class="op-hjid">
+                            <span class="op-dot" :class="statusOf(selectedDevice || {})"
+                                  style="display:inline-block;vertical-align:middle;margin-right:6px;"></span>
+                            [[ statusLabel(selectedDevice || {}) ]]
+                            <span v-if="selectedDevice && selectedDevice.jid"> · [[ selectedDevice.jid ]]</span>
+                        </div>
+                    </div>
+                    <button class="ui small red basic icon button" @click="deleteInstance"
+                            title="Delete instance">
+                        <i class="trash icon" style="margin:0;"></i>
+                    </button>
+                </div>
+
+                <!-- Tabs -->
+                <div class="op-tabs">
+                    <div class="op-tab" :class="{ active: activeTab === 'compose' }" @click="activeTab = 'compose'">
+                        <i class="paper plane icon"></i> Compose
+                    </div>
+                    <div class="op-tab" :class="{ active: activeTab === 'connection' }" @click="activeTab = 'connection'">
+                        <i class="plug icon"></i> Connection
+                    </div>
+                    <div class="op-tab" :class="{ active: activeTab === 'chats' }" @click="activeTab = 'chats'">
+                        <i class="comments icon"></i> Chats
+                    </div>
+                    <div class="op-tab" :class="{ active: activeTab === 'groups' }" @click="activeTab = 'groups'">
+                        <i class="users icon"></i> Groups
+                    </div>
+                    <div class="op-tab" :class="{ active: activeTab === 'channels' }" @click="activeTab = 'channels'">
+                        <i class="bullhorn icon"></i> Channels
+                    </div>
+                    <div class="op-tab" :class="{ active: activeTab === 'account' }" @click="activeTab = 'account'">
+                        <i class="user circle icon"></i> Account
+                    </div>
+                </div>
+
+                <!-- Compose (PILOT — real components) -->
+                <div v-show="activeTab === 'compose'">
+                    <div class="ui three column doubling grid cards">
+                        <send-message></send-message>
+                        <send-image></send-image>
+                        <send-file max-file-size="{{ .MaxFileSize }}"></send-file>
+                        <send-video max-video-size="{{ .MaxVideoSize }}"></send-video>
+                        <send-sticker></send-sticker>
+                        <send-contact></send-contact>
+                        <send-location></send-location>
+                        <send-audio></send-audio>
+                        <send-poll></send-poll>
+                        <send-presence></send-presence>
+                        <send-chat-presence></send-chat-presence>
+                        <send-link></send-link>
+                    </div>
+                </div>
+
+                <!-- Connection (PILOT — real components) -->
+                <div v-show="activeTab === 'connection'">
+                    <div class="ui three column doubling grid cards">
+                        <app-login :logged-in="isSelectedDeviceLoggedIn"></app-login>
+                        <app-login-with-code :logged-in="isSelectedDeviceLoggedIn"></app-login-with-code>
+                        <app-reconnect @reload-devices="handleReloadDevice"></app-reconnect>
+                        <app-logout @reload-devices="handleReloadDevice"></app-logout>
+                    </div>
+                </div>
+
+                <!-- Chats (folds Chat Management + Message actions, per the design brief) -->
+                <div v-show="activeTab === 'chats'">
+                    <div class="ui three column doubling grid cards">
+                        <chat-list></chat-list>
+                        <chat-messages></chat-messages>
+                        <chat-pin-manager></chat-pin-manager>
+                        <chat-disappearing-manager></chat-disappearing-manager>
+                        <message-read></message-read>
+                        <message-react></message-react>
+                        <message-update></message-update>
+                        <message-revoke></message-revoke>
+                        <message-delete></message-delete>
+                    </div>
+                </div>
+
+                <!-- Groups -->
+                <div v-show="activeTab === 'groups'">
+                    <div class="ui three column doubling grid cards">
+                        <group-list :connected="connected_devices"></group-list>
+                        <group-create></group-create>
+                        <group-join-with-link></group-join-with-link>
+                        <group-info-from-link></group-info-from-link>
+                        <group-add-participants></group-add-participants>
+                        <group-set-photo></group-set-photo>
+                        <group-set-name></group-set-name>
+                        <group-set-locked></group-set-locked>
+                        <group-set-announce></group-set-announce>
+                        <group-set-topic></group-set-topic>
+                        <group-get-invite-link></group-get-invite-link>
+                        <group-info></group-info>
+                    </div>
+                </div>
+
+                <!-- Channels (Newsletter) -->
+                <div v-show="activeTab === 'channels'">
+                    <div class="ui three column doubling grid cards">
+                        <newsletter-list></newsletter-list>
+                    </div>
+                </div>
+
+                <!-- Account -->
+                <div v-show="activeTab === 'account'">
+                    <div class="ui three column doubling grid cards">
+                        <account-avatar></account-avatar>
+                        <account-change-avatar></account-change-avatar>
+                        <account-change-push-name></account-change-push-name>
+                        <account-user-info></account-user-info>
+                        <account-business-profile></account-business-profile>
+                        <account-privacy></account-privacy>
+                        <account-contact></account-contact>
+                        <account-user-check></account-user-check>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Empty state -->
+            <div v-else class="op-empty">
+                <i class="hand point left outline icon"></i>
+                <h3 class="ui header" style="color: var(--secondary-color);">Select an instance</h3>
+                <p>Pick a WhatsApp instance on the left to operate it, or add a new one.</p>
+            </div>
+        </section>
+    </div>
+
+    <!-- Hidden data/logic provider: the existing DeviceManager, driven via $refs.
+         We reuse its fetch/select/delete logic + its delete modal untouched;
+         only its default UI is hidden in favor of the sidebar above. -->
+    <div style="display:none;">
+        <device-manager
+            ref="deviceManager"
+            ws-base-path="{{ .AppBasePath }}"
+            @device-selected="handleDeviceSelected"
+            @devices-updated="handleDevicesUpdated">
+        </device-manager>
+    </div>
+</div>
+
+<script>
+    window.TYPEGROUP = "@g.us";
+    window.TYPEUSER = "@s.whatsapp.net";
+    window.TYPENEWSLETTER = "@newsletter";
+    window.TYPELID = "@lid";
+    window.TYPESTATUS = "status@broadcast";
+    window.showErrorInfo = (message) => {
+        $('body').toast({
+            position: 'bottom right',
+            title: 'Error',
+            message: message,
+            showProgress: 'bottom',
+            classProgress: 'red'
+        });
+    }
+    window.showSuccessInfo = (message) => {
+        $('body').toast({
+            position: 'bottom right',
+            title: 'Success',
+            message: message,
+            showProgress: 'bottom',
+            classProgress: 'green'
+        });
+    }
+
+    const baseHost = `${window.location.protocol}//${window.location.hostname}${window.location.port ? ':' + window.location.port : ''}`;
+    const DEVICE_ID_HEADER = 'X-Device-Id';
+    window.http = axios.create({
+        baseURL: `${baseHost}{{ .AppBasePath }}`
+    });
+    {{ if isEnableBasicAuth .BasicAuthToken }}
+    window.http.defaults.headers.common['Authorization'] = "{{ .BasicAuthToken }}";
+    {{ end }}
+</script>
+<script type="module">
+    import AppLogin from "{{ .AppBasePath }}/components/AppLogin.js";
+    import AppLoginWithCode from "{{ .AppBasePath }}/components/AppLoginWithCode.js";
+    import AppLogout from "{{ .AppBasePath }}/components/AppLogout.js";
+    import AppReconnect from "{{ .AppBasePath }}/components/AppReconnect.js";
+    import SendMessage from "{{ .AppBasePath }}/components/SendMessage.js";
+    import SendImage from "{{ .AppBasePath }}/components/SendImage.js";
+    import SendFile from "{{ .AppBasePath }}/components/SendFile.js";
+    import SendVideo from "{{ .AppBasePath }}/components/SendVideo.js";
+    import SendSticker from "{{ .AppBasePath }}/components/SendSticker.js";
+    import SendLink from "{{ .AppBasePath }}/components/SendLink.js";
+    import SendContact from "{{ .AppBasePath }}/components/SendContact.js";
+    import SendLocation from "{{ .AppBasePath }}/components/SendLocation.js";
+    import SendAudio from "{{ .AppBasePath }}/components/SendAudio.js";
+    import SendPoll from "{{ .AppBasePath }}/components/SendPoll.js";
+    import SendPresence from "{{ .AppBasePath }}/components/SendPresence.js";
+    import SendChatPresence from "{{ .AppBasePath }}/components/SendChatPresence.js";
+    import MessageDelete from "{{ .AppBasePath }}/components/MessageDelete.js";
+    import MessageUpdate from "{{ .AppBasePath }}/components/MessageUpdate.js";
+    import MessageReact from "{{ .AppBasePath }}/components/MessageReact.js";
+    import MessageRevoke from "{{ .AppBasePath }}/components/MessageRevoke.js";
+    import MessageRead from "{{ .AppBasePath }}/components/MessageRead.js";
+    import GroupList from "{{ .AppBasePath }}/components/GroupList.js";
+    import GroupCreate from "{{ .AppBasePath }}/components/GroupCreate.js";
+    import GroupJoinWithLink from "{{ .AppBasePath }}/components/GroupJoinWithLink.js";
+    import GroupInfoFromLink from "{{ .AppBasePath }}/components/GroupInfoFromLink.js";
+    import GroupAddParticipants from "{{ .AppBasePath }}/components/GroupManageParticipants.js";
+    import GroupSetPhoto from "{{ .AppBasePath }}/components/GroupSetPhoto.js";
+    import GroupSetName from "{{ .AppBasePath }}/components/GroupSetName.js";
+    import GroupSetLocked from "{{ .AppBasePath }}/components/GroupSetLocked.js";
+    import GroupSetAnnounce from "{{ .AppBasePath }}/components/GroupSetAnnounce.js";
+    import GroupSetTopic from "{{ .AppBasePath }}/components/GroupSetTopic.js";
+    import GroupGetInviteLink from "{{ .AppBasePath }}/components/GroupGetInviteLink.js";
+    import GroupInfo from "{{ .AppBasePath }}/components/GroupInfo.js";
+    import NewsletterList from "{{ .AppBasePath }}/components/NewsletterList.js";
+    import AccountAvatar from "{{ .AppBasePath }}/components/AccountAvatar.js";
+    import AccountChangeAvatar from "{{ .AppBasePath }}/components/AccountChangeAvatar.js";
+    import AccountChangePushName from "{{ .AppBasePath }}/components/AccountChangePushName.js";
+    import AccountUserInfo from "{{ .AppBasePath }}/components/AccountUserInfo.js";
+    import AccountPrivacy from "{{ .AppBasePath }}/components/AccountPrivacy.js";
+    import AccountContact from "{{ .AppBasePath }}/components/AccountContact.js";
+    import AccountUserCheck from "{{ .AppBasePath }}/components/AccountUserCheck.js";
+    import AccountBusinessProfile from "{{ .AppBasePath }}/components/AccountBusinessProfile.js";
+    import ChatPinManager from "{{ .AppBasePath }}/components/ChatPinManager.js";
+    import ChatDisappearingManager from "{{ .AppBasePath }}/components/ChatDisappearingManager.js";
+    import ChatList from "{{ .AppBasePath }}/components/ChatList.js";
+    import ChatMessages from "{{ .AppBasePath }}/components/ChatMessages.js";
+    import DeviceManager from "{{ .AppBasePath }}/components/DeviceManager.js";
+
+    const showErrorInfo = (message) => {
+        $('body').toast({
+            position: 'bottom right',
+            title: 'Error',
+            message: message,
+            showProgress: 'bottom',
+            classProgress: 'red'
+        });
+    }
+    const showSuccessInfo = (message) => {
+        $('body').toast({
+            position: 'bottom right',
+            title: 'Success',
+            message: message,
+            showProgress: 'bottom',
+            classProgress: 'green'
+        });
+    }
+
+    Vue.createApp({
+        components: {
+            AppLogin, AppLoginWithCode, AppLogout, AppReconnect,
+            SendMessage, SendImage, SendFile, SendVideo, SendSticker, SendLink, SendContact, SendLocation, SendAudio, SendPoll, SendPresence, SendChatPresence,
+            MessageDelete, MessageUpdate, MessageReact, MessageRevoke, MessageRead,
+            GroupList, GroupCreate, GroupJoinWithLink, GroupInfoFromLink, GroupAddParticipants, GroupSetPhoto, GroupSetName, GroupSetLocked, GroupSetAnnounce, GroupSetTopic, GroupGetInviteLink, GroupInfo,
+            NewsletterList,
+            AccountAvatar, AccountUserInfo, AccountPrivacy, AccountChangeAvatar, AccountContact, AccountChangePushName, AccountUserCheck, AccountBusinessProfile,
+            ChatPinManager, ChatDisappearingManager, ChatList, ChatMessages,
+            DeviceManager
+        },
+        delimiters: ['[[', ']]'],
+        data() {
+            return {
+                app_ws: null,
+                connected_devices: null,
+                deviceList: [],
+                selectedDeviceId: '',
+                appVersion: '{{ .AppVersion }}',
+                // operator shell state
+                activeTab: 'compose',
+                filterText: '',
+                statusFilter: 'all',
+                darkMode: false,
+                isAdding: false,
+            }
+        },
+        computed: {
+            selectedDevice() {
+                if (!this.selectedDeviceId) return null;
+                return this.deviceList.find(d => (d.id || d.device) === this.selectedDeviceId) || null;
+            },
+            isSelectedDeviceLoggedIn() {
+                return this.selectedDevice?.state === 'logged_in';
+            },
+            statusCounts() {
+                const c = { online: 0, qr: 0, offline: 0 };
+                for (const d of this.deviceList) c[this.statusOf(d)]++;
+                return c;
+            },
+            filteredDevices() {
+                const q = this.filterText.trim().toLowerCase();
+                return this.deviceList.filter(d => {
+                    if (this.statusFilter !== 'all' && this.statusOf(d) !== this.statusFilter) return false;
+                    if (!q) return true;
+                    const hay = `${d.name || ''} ${d.id || d.device || ''} ${d.jid || ''}`.toLowerCase();
+                    return hay.includes(q);
+                });
+            },
+        },
+        methods: {
+            // ---- status helpers (heuristic over whatsmeow state) ----
+            statusOf(dev) {
+                const s = (dev && dev.state) || '';
+                if (s === 'logged_in') return 'online';
+                if (s === 'disconnected' || s === '') return 'offline';
+                return 'qr';
+            },
+            statusLabel(dev) {
+                const map = { online: 'Connected', qr: 'Needs pairing', offline: 'Disconnected' };
+                return map[this.statusOf(dev)] || 'Unknown';
+            },
+            avatarLetter(dev) {
+                const src = (dev && (dev.name || dev.id || dev.device)) || '?';
+                return String(src).charAt(0).toUpperCase();
+            },
+            shortJid(jid) {
+                return String(jid).split(/[:@]/)[0];
+            },
+            // ---- device actions: reuse DeviceManager via $refs (no rewrite) ----
+            selectInstance(id) {
+                if (this.$refs.deviceManager) this.$refs.deviceManager.setDeviceContext(id);
+            },
+            refreshInstances() {
+                if (this.$refs.deviceManager) this.$refs.deviceManager.refresh();
+            },
+            async addInstance() {
+                if (!this.$refs.deviceManager) return;
+                this.isAdding = true;
+                try {
+                    await this.$refs.deviceManager.createDevice();
+                } finally {
+                    this.isAdding = false;
+                }
+            },
+            deleteInstance() {
+                if (!this.selectedDevice || !this.$refs.deviceManager) return;
+                this.$refs.deviceManager.openDeleteModal(this.selectedDeviceId, this.selectedDevice.jid);
+            },
+            // ---- dark mode ----
+            toggleDark() {
+                this.darkMode = !this.darkMode;
+                document.body.classList.toggle('op-dark', this.darkMode);
+                try { localStorage.setItem('gowa_operator_dark', this.darkMode ? '1' : '0'); } catch (e) {}
+            },
+            // ---- device context wiring (mirrors index.html) ----
+            applyDeviceHeader(id) {
+                if (id) {
+                    window.http.defaults.headers.common[DEVICE_ID_HEADER] = encodeURIComponent(id);
+                } else {
+                    delete window.http.defaults.headers.common[DEVICE_ID_HEADER];
+                    if (this.app_ws) {
+                        this.app_ws.close();
+                        this.app_ws = null;
+                    }
+                }
+            },
+            constructWebSocketURL() {
+                if (!this.selectedDeviceId) return '';
+                const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
+                const basePath = '{{ .AppBasePath }}';
+                const deviceQuery = encodeURIComponent(this.selectedDeviceId);
+                const pathPrefix = basePath || '';
+                return `${protocol}${location.host}${pathPrefix}/ws?device_id=${deviceQuery}`;
+            },
+            handleReloadDevice() {
+                if (this.$refs.deviceManager) {
+                    this.$refs.deviceManager.refresh();
+                }
+                if (this.app_ws) {
+                    this.app_ws.send(JSON.stringify({"code": "FETCH_DEVICES"}));
+                }
+            },
+            handleDeviceSelected(id) {
+                this.selectedDeviceId = id;
+                this.applyDeviceHeader(id);
+                if (id) {
+                    this.connectWebSocket();
+                }
+            },
+            handleDevicesUpdated(devices) {
+                this.deviceList = devices;
+                this.connected_devices = devices;
+            },
+            connectWebSocket() {
+                if (!this.selectedDeviceId) {
+                    return;
+                }
+
+                if (this.app_ws) {
+                    this.app_ws.close();
+                    this.app_ws = null;
+                }
+
+                const wsURL = this.constructWebSocketURL();
+                if (!wsURL) {
+                    return;
+                }
+
+                this.app_ws = new WebSocket(wsURL);
+
+                this.app_ws.onopen = (evt) => {
+                    this.handleReloadDevice();
+                };
+
+                this.app_ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    if (this.isSelectedDeviceLoggedIn) {
+                        showErrorInfo('Connection error occurred. Please refresh or re-select the device.');
+                    }
+                };
+
+                this.app_ws.onmessage = (evt) => {
+                    const message = JSON.parse(evt.data)
+                    switch (message.code) {
+                        case 'LOGIN_SUCCESS':
+                            showSuccessInfo(message.message)
+                            $('#modalLogin').modal('hide');
+                            this.handleReloadDevice()
+                            break;
+                        case 'LIST_DEVICES':
+                            this.connected_devices = message.result
+                            break;
+                        case 'LOGOUT_COMPLETE':
+                            showSuccessInfo('✅ ' + message.message)
+                            this.handleReloadDevice()
+                            break;
+                        case 'DEVICE_REMOVED': {
+                            const removedId = message.result?.device_id;
+                            const devices = message.result?.devices;
+                            showSuccessInfo('✅ ' + (message.message || 'Device removed'));
+
+                            if (Array.isArray(devices)) {
+                                this.deviceList = devices;
+                                this.connected_devices = devices;
+
+                                if (removedId && this.selectedDeviceId === removedId) {
+                                    this.selectedDeviceId = '';
+                                    this.applyDeviceHeader('');
+                                }
+
+                                if (!this.selectedDeviceId && this.deviceList.length > 0) {
+                                    const first = this.deviceList[0].id || this.deviceList[0].device;
+                                    this.selectInstance(first);
+                                }
+                            } else {
+                                this.handleReloadDevice();
+                            }
+                            break;
+                        }
+                        default:
+                            console.log(message)
+                    }
+                };
+            },
+        },
+        mounted() {
+            // restore dark-mode preference
+            try {
+                if (localStorage.getItem('gowa_operator_dark') === '1') {
+                    this.darkMode = true;
+                    document.body.classList.add('op-dark');
+                }
+            } catch (e) {}
+
+            setTimeout(() => {
+                document.getElementById('app').style.display = 'block';
+                document.getElementById('splash-screen').classList.add('fade-out');
+            }, 800);
+        },
+    }).mount('#app')
+</script>
+</body>
+</html>

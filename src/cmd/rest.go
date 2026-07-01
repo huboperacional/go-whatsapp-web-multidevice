@@ -164,16 +164,23 @@ func restServer(_ *cobra.Command, _ []string) {
 		apiGroup.Get("/chatwoot/sync/status", chatwootHandler.SyncStatus)
 	}
 
-	apiGroup.Get("/", func(c *fiber.Ctx) error {
-		return c.Render("views/index", fiber.Map{
-			"AppHost":        fmt.Sprintf("%s://%s", c.Protocol(), c.Hostname()),
-			"AppVersion":     config.AppVersion,
-			"AppBasePath":    config.AppBasePath,
-			"BasicAuthToken": c.UserContext().Value(middleware.AuthorizationValue("BASIC_AUTH")),
-			"MaxFileSize":    humanize.Bytes(uint64(config.WhatsappSettingMaxFileSize)),
-			"MaxVideoSize":   humanize.Bytes(uint64(config.WhatsappSettingMaxVideoSize)),
-		})
-	})
+	rootView := func(view string) fiber.Handler {
+		return func(c *fiber.Ctx) error {
+			return c.Render(view, fiber.Map{
+				"AppHost":        fmt.Sprintf("%s://%s", c.Protocol(), c.Hostname()),
+				"AppVersion":     config.AppVersion,
+				"AppBasePath":    config.AppBasePath,
+				"BasicAuthToken": c.UserContext().Value(middleware.AuthorizationValue("BASIC_AUTH")),
+				"MaxFileSize":    humanize.Bytes(uint64(config.WhatsappSettingMaxFileSize)),
+				"MaxVideoSize":   humanize.Bytes(uint64(config.WhatsappSettingMaxVideoSize)),
+			})
+		}
+	}
+
+	apiGroup.Get("/", rootView("views/index"))
+	// Additive, opt-in operator console (master-detail multi-instance UI). Reuses the
+	// same components/assets as the default view; index.html stays the default.
+	apiGroup.Get("/operator", rootView("views/operator"))
 
 	go websocket.RunHub()
 
