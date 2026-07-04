@@ -625,6 +625,7 @@
                 darkMode: false,
                 isAdding: false,
                 newInstanceName: '',
+                pairingPollTimer: null,
             }
         },
         computed: {
@@ -835,6 +836,25 @@
                 window.addEventListener('load', () => setTimeout(reveal, 120));
             }
             setTimeout(reveal, 1500);
+
+            // Safety-net polling for the pairing flow: the backend broadcasts
+            // LOGIN_SUCCESS over the websocket after a QR scan, but that broadcast
+            // is fire-and-forget (no retry, no delivery guarantee) — a dropped
+            // connection or a missed message leaves the sidebar showing a stale
+            // "needs pairing" status forever. While the Connection tab is open,
+            // poll the device list periodically so pairing is reflected even if
+            // the websocket event never arrives.
+            this.pairingPollTimer = setInterval(() => {
+                if (this.activeTab === 'connection') {
+                    this.refreshInstances();
+                }
+            }, 4000);
+        },
+        beforeUnmount() {
+            if (this.pairingPollTimer) {
+                clearInterval(this.pairingPollTimer);
+                this.pairingPollTimer = null;
+            }
         },
     }).mount('#app')
 </script>
