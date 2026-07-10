@@ -56,6 +56,7 @@ func (m *DeviceManager) AddDevice(instance *DeviceInstance) {
 			DeviceID:    instance.ID(),
 			DisplayName: instance.DisplayName(),
 			JID:         instance.JID(),
+			DeviceJID:   instance.ADJID(),
 			CreatedAt:   instance.CreatedAt(),
 			UpdatedAt:   time.Now(),
 		})
@@ -319,8 +320,11 @@ func (m *DeviceManager) resetDeviceKeepSlot(deviceID string) error {
 			DeviceID:    deviceID,
 			DisplayName: inst.DisplayName(),
 			JID:         "",
-			CreatedAt:   inst.CreatedAt(),
-			UpdatedAt:   time.Now(),
+			// On logout the slot no longer maps to any companion, so clear the
+			// AD JID together with the JID.
+			DeviceJID: "",
+			CreatedAt: inst.CreatedAt(),
+			UpdatedAt: time.Now(),
 		}); err != nil {
 			return fmt.Errorf("persist logged-out device %s: %w", deviceID, err)
 		}
@@ -354,6 +358,7 @@ func (m *DeviceManager) CreateDevice(ctx context.Context, requestedID string) (*
 			DeviceID:    id,
 			DisplayName: instance.DisplayName(),
 			JID:         instance.JID(),
+			DeviceJID:   instance.ADJID(),
 			CreatedAt:   instance.CreatedAt(),
 			UpdatedAt:   instance.CreatedAt(),
 		}); err != nil {
@@ -440,7 +445,7 @@ func (m *DeviceManager) LoadExistingDevices(ctx context.Context) error {
 
 		// Skip if already matched
 		if existingByID != nil {
-			m.applyStoreJID(existingByID, jid)
+			m.applyStoreJID(existingByID, jid, dev.ID.String())
 			continue
 		}
 		if matchedDevice != nil {
@@ -450,11 +455,12 @@ func (m *DeviceManager) LoadExistingDevices(ctx context.Context) error {
 		// Match orphaned device with this JID
 		if orphanDevice != nil {
 			logrus.Infof("[DEVICE_MANAGER] matching orphaned device %s with JID %s", orphanDevice.ID(), jid)
-			m.applyStoreJID(orphanDevice, jid)
+			m.applyStoreJID(orphanDevice, jid, dev.ID.String())
 			if m.storage != nil {
 				_ = m.storage.SaveDeviceRecord(&domainChatStorage.DeviceRecord{
-					DeviceID: orphanDevice.ID(),
-					JID:      jid,
+					DeviceID:  orphanDevice.ID(),
+					JID:       jid,
+					DeviceJID: dev.ID.String(),
 				})
 			}
 			continue
@@ -463,19 +469,20 @@ func (m *DeviceManager) LoadExistingDevices(ctx context.Context) error {
 		// Create new device instance
 		instance := NewDeviceInstance(jid, nil, newDeviceChatStorage(jid, m.storage))
 		instance.SetState(domainDevice.DeviceStateDisconnected)
-		m.applyStoreJID(instance, jid)
+		m.applyStoreJID(instance, jid, dev.ID.String())
 		m.AddDevice(instance)
 	}
 
 	return nil
 }
 
-func (m *DeviceManager) applyStoreJID(instance *DeviceInstance, jid string) {
+func (m *DeviceManager) applyStoreJID(instance *DeviceInstance, jid, adJID string) {
 	if instance == nil || jid == "" {
 		return
 	}
 	instance.mu.Lock()
 	instance.jid = jid
+	instance.adJID = adJID
 	instance.mu.Unlock()
 	instance.SetChatStorage(newDeviceChatStorage(jid, m.storage))
 }
