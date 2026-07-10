@@ -543,3 +543,38 @@ func TestDeleteStoreRowsForJID_KeysFailureIsIdempotent(t *testing.T) {
 	assertStoreLacksADJID(t, ctx, primaryStore, adJID.String())
 	assertStoreLacksADJID(t, ctx, keysStore, adJID.String())
 }
+
+// Silent-data-loss fix: two slot records share a NonAD number but map to DIFFERENT
+// companions (distinct AD JIDs :28 and :32). loadFromRegistry must keep BOTH in memory --
+// the AD-JID-aware dedup keeps both records, and the AD-JID-aware existingByJID match must
+// not collapse them (matching on the bare number would evict the first when the second
+// loads). Neither DeviceRecord may be deleted from storage.
+func TestLoadFromRegistryKeepsTwoADDistinctSlots(t *testing.T) {
+	const user = "6281888888886"
+	adJID28 := types.NewADJID(user, types.WhatsAppDomain, 28)
+	adJID32 := types.NewADJID(user, types.WhatsAppDomain, 32)
+	nonAD := adJID28.ToNonAD().String()
+
+	storage := &keepSlotStubStorage{}
+	manager := NewDeviceManager(nil, nil, storage)
+
+	records := []*domainChatStorage.DeviceRecord{
+		{DeviceID: "auth-slot", DisplayName: "Auth", JID: nonAD, DeviceJID: adJID28.String()},
+		{DeviceID: "notificador-slot", DisplayName: "Notificador", JID: nonAD, DeviceJID: adJID32.String()},
+	}
+
+	manager.loadFromRegistry(records)
+
+	if _, ok := manager.GetDevice("auth-slot"); !ok {
+		t.Fatal("expected auth-slot (:28) to remain registered after loadFromRegistry")
+	}
+	if _, ok := manager.GetDevice("notificador-slot"); !ok {
+		t.Fatal("expected notificador-slot (:32) to remain registered after loadFromRegistry")
+	}
+
+	// No record may be deleted: reconciliation drops in-memory duplicates only, never
+	// persisted slots. keepSlotStubStorage records every DeleteDeviceRecord call.
+	if len(storage.deletedRecords) != 0 {
+		t.Fatalf("expected no DeleteDeviceRecord calls, got %v", storage.deletedRecords)
+	}
+}
