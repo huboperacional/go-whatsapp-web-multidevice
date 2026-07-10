@@ -639,11 +639,26 @@ func (m *DeviceManager) loadFromRegistry(records []*domainChatStorage.DeviceReco
 			seenNonADJIDs[rec.JID] = true
 		}
 
-		// Check if a device with this JID already exists in memory (from InitWaCLI)
+		// Check if the same session already exists in memory under a different id (e.g.
+		// bootstrapped by InitWaCLI) so we can replace it with this registry slot and
+		// transfer its live client. Match on the full AD JID when known -- matching on the
+		// bare number would collapse two distinct companions of the same number into one.
+		// Legacy records with no AD JID fall back to the number (unambiguous only until
+		// backfill; the same limitation the dedup above carries).
 		m.mu.RLock()
 		var existingByJID *DeviceInstance
 		for id, inst := range m.devices {
-			if rec.JID != "" && inst.JID() == rec.JID && id != rec.DeviceID {
+			if id == rec.DeviceID {
+				continue
+			}
+			if rec.DeviceJID != "" {
+				if inst.ADJID() == rec.DeviceJID {
+					existingByJID = inst
+					break
+				}
+				continue
+			}
+			if rec.JID != "" && inst.JID() == rec.JID {
 				existingByJID = inst
 				break
 			}
