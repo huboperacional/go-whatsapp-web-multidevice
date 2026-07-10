@@ -494,6 +494,18 @@ func (m *DeviceManager) LoadExistingDevices(ctx context.Context) error {
 	}
 
 	logrus.Infof("[DEVICE_MANAGER] discovered %d device records in store", len(devices))
+
+	// A number can host several companions. Count them up front so we only ever bind a
+	// slot to a store row when the mapping is unambiguous -- binding the wrong companion
+	// would hand two slots the same session.
+	rowsPerNumber := make(map[string]int, len(devices))
+	for _, dev := range devices {
+		if dev == nil || dev.ID == nil {
+			continue
+		}
+		rowsPerNumber[dev.ID.ToNonAD().String()]++
+	}
+
 	for _, dev := range devices {
 		if dev == nil || dev.ID == nil {
 			continue
@@ -523,6 +535,16 @@ func (m *DeviceManager) LoadExistingDevices(ctx context.Context) error {
 			continue
 		}
 		if matchedDevice != nil {
+			// Legacy slot (no AD JID persisted yet): adopt this row's AD JID so the slot keeps
+			// driving its existing companion instead of minting a new one on the next connect.
+			// Only safe when exactly one row carries the number.
+			if matchedDevice.ADJID() == "" {
+				if rowsPerNumber[jid] == 1 {
+					m.applyStoreJID(matchedDevice, jid, dev.ID.String())
+				} else {
+					logrus.Warnf("[DEVICE_MANAGER] %d companions carry number %s; cannot infer which belongs to slot %s -- it will require a fresh pairing (run prune-devices to clean up)", rowsPerNumber[jid], jid, matchedDevice.ID())
+				}
+			}
 			continue
 		}
 
@@ -645,6 +667,7 @@ func (m *DeviceManager) loadFromRegistry(records []*domainChatStorage.DeviceReco
 		instance.SetState(domainDevice.DeviceStateDisconnected)
 		instance.displayName = rec.DisplayName
 		instance.jid = rec.JID
+		instance.adJID = rec.DeviceJID
 
 		// If we had an existing device with client, transfer the client
 		if existingByJID != nil {
@@ -807,8 +830,10 @@ func (m *DeviceManager) getOrCreateStoreDevice(ctx context.Context, deviceID str
 		// use its recorded AD JID (never its NonAD JID).
 		m.mu.RLock()
 		var instADJID string
+		var instNonAD string
 		if inst, ok := m.devices[deviceID]; ok {
 			instADJID = inst.ADJID()
+			instNonAD = inst.JID()
 		}
 		m.mu.RUnlock()
 
@@ -819,6 +844,21 @@ func (m *DeviceManager) getOrCreateStoreDevice(ctx context.Context, deviceID str
 				} else if dev != nil {
 					return dev, nil
 				}
+			}
+		}
+
+		// Last resort before minting: resolve by the best-known bare number, but only
+		// when exactly one store row carries it. Prefer the number parsed from deviceID
+		// (when it is itself a JID); otherwise fall back to the in-memory instance's JID.
+		nonAD := instNonAD
+		if parsed, err := types.ParseJID(deviceID); err == nil && parsed.User != "" {
+			nonAD = parsed.ToNonAD().String()
+		}
+		if strings.TrimSpace(nonAD) != "" {
+			if dev, err := findStoreDeviceByUniqueNumber(ctx, m.store, nonAD); err != nil {
+				return nil, err
+			} else if dev != nil {
+				return dev, nil
 			}
 		}
 	}
@@ -856,6 +896,36 @@ func findStoreDeviceByADJID(ctx context.Context, container *sqlstore.Container, 
 		return dev, nil
 	}
 	return nil, nil
+}
+
+// findStoreDeviceByUniqueNumber resolves a companion from a bare (NonAD) number.
+//
+// A number can host several companions, so this only succeeds when exactly one store
+// row carries it. When several do, the mapping is ambiguous and we return nil rather
+// than adopt a row that may belong to a different, live slot.
+func findStoreDeviceByUniqueNumber(ctx context.Context, container *sqlstore.Container, nonADJID string) (*store.Device, error) {
+	if container == nil || strings.TrimSpace(nonADJID) == "" {
+		return nil, nil
+	}
+	devices, err := container.GetAllDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var match *store.Device
+	for _, dev := range devices {
+		if dev == nil || dev.ID == nil {
+			continue
+		}
+		if dev.ID.ToNonAD().String() != nonADJID {
+			continue
+		}
+		if match != nil {
+			logrus.Warnf("[DEVICE_MANAGER] several companions carry number %s; refusing to guess which one to reuse -- a fresh pairing will be created", nonADJID)
+			return nil, nil
+		}
+		match = dev
+	}
+	return match, nil
 }
 
 func configureDeviceProps() {
