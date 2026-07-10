@@ -103,6 +103,7 @@ type DeviceRecord struct {
 	DeviceID                 string    `db:"device_id"`
 	DisplayName              string    `db:"display_name"`
 	JID                      string    `db:"jid"`
+	DeviceJID                string    `db:"device_jid"` // full AD JID (e.g. 5567...:32@s.whatsapp.net); "" = legacy/unknown, backfilled on next connect
 	WebhookURL               *string   `db:"webhook_url"`
 	WebhookSecret            string    `db:"webhook_secret"`
 	WebhookEvents            string    `db:"webhook_events"`
