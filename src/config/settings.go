@@ -37,6 +37,11 @@ var (
 	WhatsappWebhookEvents             []string         // Whitelist of events to forward to webhook (empty = all events)
 	WhatsappWebhookIgnoreJids         []string         // JIDs (or "@g.us"/"@s.whatsapp.net"/"@lid" wildcards) to skip when forwarding to webhooks
 	WhatsappAutoRejectCall                     = false // Auto-reject incoming calls
+	// WhatsappAdoptOrphanStoreDevices, when true, restores the legacy behaviour of
+	// registering an in-memory device for every whatsmeow store row that no slot
+	// claims (and then auto-dialling it). That produced endless reconnect churn
+	// against dead sessions, so it now defaults to false: unclaimed rows are skipped.
+	WhatsappAdoptOrphanStoreDevices = false
 	WhatsappLogLevel                           = "ERROR"
 	WhatsappSettingMaxImageSize       int64    = 20000000  // 20MB
 	WhatsappSettingMaxFileSize        int64    = 50000000  // 50MB

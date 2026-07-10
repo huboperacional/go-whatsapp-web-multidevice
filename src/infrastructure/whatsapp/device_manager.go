@@ -540,7 +540,14 @@ func (m *DeviceManager) LoadExistingDevices(ctx context.Context) error {
 			continue
 		}
 
-		// Create new device instance
+		// Create new device instance for a store row that no slot claims. By default we
+		// do NOT: adopting it registers an instance that the auto-connect loop then dials
+		// forever against a dead session (endless websocket close 1005 churn). Opt back
+		// into the legacy behaviour with WHATSAPP_ADOPT_ORPHAN_STORE_DEVICES=true.
+		if !config.WhatsappAdoptOrphanStoreDevices {
+			logrus.Warnf("[DEVICE_MANAGER] store row %s is not claimed by any slot; skipping adoption (set WHATSAPP_ADOPT_ORPHAN_STORE_DEVICES=true to restore the old behaviour). Run prune-devices to clean it up.", jid)
+			continue
+		}
 		instance := NewDeviceInstance(jid, nil, newDeviceChatStorage(jid, m.storage))
 		instance.SetState(domainDevice.DeviceStateDisconnected)
 		m.applyStoreJID(instance, jid, dev.ID.String())
@@ -574,29 +581,40 @@ func (m *DeviceManager) loadFromRegistry(records []*domainChatStorage.DeviceReco
 		}
 	}
 
-	// Load devices, removing auto-created duplicates
-	seenJIDs := make(map[string]bool)
+	// Load devices, skipping (never deleting) auto-created and duplicate records.
+	// Dedup keys on the full AD JID when known so two genuine companions of the same
+	// number both load; only un-backfilled legacy rows fall back to NonAD dedup.
+	seenADJIDs := make(map[string]bool)
+	seenNonADJIDs := make(map[string]bool)
 	for _, rec := range records {
 		if rec == nil || strings.TrimSpace(rec.DeviceID) == "" {
 			continue
 		}
 
-		// Skip auto-created devices if manual device with same JID exists
+		// Skip (do NOT delete) auto-created devices when a manual slot already claims
+		// the same JID. Deleting a persisted slot record during startup reconciliation
+		// is silent data loss; record deletion belongs to RemoveDevice/PurgeDevice only.
 		isAutoCreated := strings.Contains(rec.DeviceID, "@")
 		if isAutoCreated && manualDeviceJIDs[rec.DeviceID] {
-			logrus.Warnf("[DEVICE_MANAGER] removing auto-created device %s", rec.DeviceID)
-			_ = m.storage.DeleteDeviceRecord(rec.DeviceID)
+			logrus.Warnf("[DEVICE_MANAGER] skipping (not deleting) auto-created device %s: a manual slot already claims its JID", rec.DeviceID)
 			continue
 		}
 
-		// Skip duplicate JIDs
-		if rec.JID != "" {
-			if seenJIDs[rec.JID] {
-				logrus.Warnf("[DEVICE_MANAGER] removing duplicate JID device %s", rec.DeviceID)
-				_ = m.storage.DeleteDeviceRecord(rec.DeviceID)
+		// Skip duplicates. Prefer the full AD JID: a true duplicate is only the same
+		// companion appearing twice. Legacy records with no AD JID fall back to NonAD
+		// dedup, preserving today's behaviour until backfill disambiguates them.
+		if rec.DeviceJID != "" {
+			if seenADJIDs[rec.DeviceJID] {
+				logrus.Warnf("[DEVICE_MANAGER] skipping (not deleting) duplicate AD JID device %s", rec.DeviceID)
 				continue
 			}
-			seenJIDs[rec.JID] = true
+			seenADJIDs[rec.DeviceJID] = true
+		} else if rec.JID != "" {
+			if seenNonADJIDs[rec.JID] {
+				logrus.Warnf("[DEVICE_MANAGER] skipping (not deleting) device %s: its number collides with another un-backfilled record; backfilling the AD JID will disambiguate it", rec.DeviceID)
+				continue
+			}
+			seenNonADJIDs[rec.JID] = true
 		}
 
 		// Check if a device with this JID already exists in memory (from InitWaCLI)
@@ -771,27 +789,32 @@ func (m *DeviceManager) getOrCreateStoreDevice(ctx context.Context, deviceID str
 		return nil, fmt.Errorf("store container is nil")
 	}
 
-	// Try to reuse an existing device record if the ID maps to a JID.
+	// Reuse an existing session row ONLY when we can identify the exact companion by
+	// its full AD JID. Resolving by the bare number would risk adopting a sibling
+	// slot's live session (a number can host several companions).
 	if deviceID != "" {
-		if jid, err := types.ParseJID(deviceID); err == nil {
-			if dev, err := findStoreDeviceByJID(ctx, m.store, jid); err != nil {
+		// Case 1: deviceID itself parses as an AD JID (has a non-zero device/agent
+		// part, so parsed.String() differs from its NonAD form).
+		if parsed, err := types.ParseJID(deviceID); err == nil && parsed.String() != parsed.ToNonAD().String() {
+			if dev, err := findStoreDeviceByADJID(ctx, m.store, parsed); err != nil {
 				return nil, err
 			} else if dev != nil {
 				return dev, nil
 			}
 		}
 
-		// If deviceID is not a valid JID, look up the device instance and use its JID
+		// Case 2: deviceID is an opaque slot id -- look up the in-memory instance and
+		// use its recorded AD JID (never its NonAD JID).
 		m.mu.RLock()
-		var instJID string
-		if inst, ok := m.devices[deviceID]; ok && inst.JID() != "" {
-			instJID = inst.JID()
+		var instADJID string
+		if inst, ok := m.devices[deviceID]; ok {
+			instADJID = inst.ADJID()
 		}
 		m.mu.RUnlock()
 
-		if instJID != "" {
-			if jid, err := types.ParseJID(instJID); err == nil {
-				if dev, err := findStoreDeviceByJID(ctx, m.store, jid); err != nil {
+		if instADJID != "" {
+			if jid, err := types.ParseJID(instADJID); err == nil {
+				if dev, err := findStoreDeviceByADJID(ctx, m.store, jid); err != nil {
 					return nil, err
 				} else if dev != nil {
 					return dev, nil
@@ -800,6 +823,8 @@ func (m *DeviceManager) getOrCreateStoreDevice(ctx context.Context, deviceID str
 		}
 	}
 
+	// Unknown or ambiguous mapping: deliberately mint a fresh companion (a new QR)
+	// rather than adopting a sibling slot's session row.
 	return m.store.NewDevice(), nil
 }
 
@@ -815,27 +840,20 @@ func (m *DeviceManager) configureKeysStore(ctx context.Context, device *store.De
 	return nil
 }
 
-func findStoreDeviceByJID(ctx context.Context, container *sqlstore.Container, jid types.JID) (*store.Device, error) {
-	if container == nil || jid.IsEmpty() {
+// findStoreDeviceByADJID returns the whatsmeow session row for exactly one companion.
+//
+// It matches on the full AD JID. Matching on the bare number is unsafe: a number can
+// host several companions, and adopting a row that belongs to a different slot would
+// hand two slots the same session.
+func findStoreDeviceByADJID(ctx context.Context, container *sqlstore.Container, adJID types.JID) (*store.Device, error) {
+	if container == nil || adJID.IsEmpty() {
 		return nil, nil
 	}
 
-	if dev, err := container.GetDevice(ctx, jid); err != nil {
+	if dev, err := container.GetDevice(ctx, adJID); err != nil {
 		return nil, err
 	} else if dev != nil {
 		return dev, nil
-	}
-
-	devices, err := container.GetAllDevices(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	targetJID := jid.ToNonAD().String()
-	for _, dev := range devices {
-		if dev != nil && dev.ID != nil && dev.ID.ToNonAD().String() == targetJID {
-			return dev, nil
-		}
 	}
 	return nil, nil
 }
