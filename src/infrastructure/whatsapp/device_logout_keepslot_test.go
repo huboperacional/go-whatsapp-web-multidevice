@@ -44,6 +44,13 @@ func (s *keepSlotStubStorage) DeleteDeviceRecord(deviceID string) error {
 	return nil
 }
 
+// ListDeviceRecords backs the legacy (no-AD-JID) ambiguity guard in deleteStoreRowsForJID.
+// These scenarios each have a single slot for the number, so returning no persisted records
+// keeps slotsClaiming at 0 (unambiguous) and preserves the original by-number delete path.
+func (s *keepSlotStubStorage) ListDeviceRecords() ([]*domainChatStorage.DeviceRecord, error) {
+	return nil, nil
+}
+
 // assertStoreLacksJID fails if any device row in the container still matches the given
 // NonAD JID. Matching mirrors deleteStoreRowsForJID / LoadExistingDevices.
 func assertStoreLacksJID(t *testing.T, ctx context.Context, c *sqlstore.Container, nonADJID string) {
@@ -195,7 +202,7 @@ func TestDeleteStoreRowsForJID_EmptyJIDIsNoOp(t *testing.T) {
 	}
 
 	manager := NewDeviceManager(primaryStore, nil, nil)
-	if err := manager.deleteStoreRowsForJID(ctx, ""); err != nil {
+	if err := manager.deleteStoreRowsForJID(ctx, "", ""); err != nil {
 		t.Fatalf("expected empty-jid no-op, got error: %v", err)
 	}
 

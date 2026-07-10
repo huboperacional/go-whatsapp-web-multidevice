@@ -149,16 +149,53 @@ func (m *DeviceManager) RemoveDevice(id string) {
 	}
 }
 
-// deleteStoreRowsForJID removes the whatsmeow device rows (primary + keys containers)
-// whose JID matches jid. Matching uses the NonAD form to mirror LoadExistingDevices,
-// where the devices table stores NonAD JIDs. It is idempotent — a row that is already
-// gone is simply not found — and an empty jid is a no-op (a slot that was never paired
-// has no store rows to delete).
-func (m *DeviceManager) deleteStoreRowsForJID(ctx context.Context, jid string) error {
-	if strings.TrimSpace(jid) == "" {
+// deleteStoreRowsForJID removes the whatsmeow session rows for a slot's companion.
+//
+// When adJID is known it identifies exactly one companion, so we delete precisely
+// that row (a number can host several companions -- deleting by number alone can
+// destroy a different, live slot's session).
+//
+// When adJID is empty (legacy rows written before the AD JID was tracked) we can
+// only match by number. That is safe ONLY when the mapping is unambiguous: exactly
+// one store row carries the number AND exactly one slot claims it. Otherwise we
+// delete nothing and log loudly -- never guess. Run the prune-devices command to
+// clean such numbers up once the AD JIDs have been backfilled.
+//
+// An empty nonADJID is a no-op (a slot that was never paired has no rows).
+func (m *DeviceManager) deleteStoreRowsForJID(ctx context.Context, adJID, nonADJID string) error {
+	if strings.TrimSpace(nonADJID) == "" && strings.TrimSpace(adJID) == "" {
 		return nil
 	}
 
+	// Legacy ambiguity guard: with no AD JID we can only match by number, so resolve how
+	// many slots claim this number ONCE, up front. If more than one slot claims it we must
+	// not guess which companion row belongs to which slot -- deleting the wrong one would
+	// destroy a different, live session. Computed only on the legacy path so the hot
+	// (AD JID known) path never pays the ListDeviceRecords cost.
+	slotsClaiming := 0
+	if adJID == "" {
+		if m.storage != nil {
+			records, err := m.storage.ListDeviceRecords()
+			if err != nil {
+				logrus.WithError(err).Errorf("[DEVICE_MANAGER] cannot resolve slot ownership for number %s; refusing to delete store rows", nonADJID)
+				return err
+			}
+			for _, rec := range records {
+				if rec != nil && rec.JID == nonADJID {
+					slotsClaiming++
+				}
+			}
+		}
+		if slotsClaiming > 1 {
+			logrus.Errorf("[DEVICE_MANAGER] %d slots claim number %s and no AD JID is known; refusing to delete any whatsmeow rows -- run prune-devices after the AD JIDs are backfilled", slotsClaiming, nonADJID)
+			return nil
+		}
+	}
+
+	// There is no cross-container transaction: a failure deleting from one container can
+	// leave a row in the other. That is acceptable because the function is idempotent -- a
+	// retry, or prune-devices, cleans the remainder, and the per-container log line names
+	// which container was left dirty.
 	var firstErr error
 	deleteFrom := func(container *sqlstore.Container, label string) {
 		if container == nil {
@@ -166,22 +203,52 @@ func (m *DeviceManager) deleteStoreRowsForJID(ctx context.Context, jid string) e
 		}
 		devices, err := container.GetAllDevices(ctx)
 		if err != nil {
-			logrus.WithError(err).Warnf("[DEVICE_MANAGER] failed to enumerate %s devices for jid %s", label, jid)
+			logrus.WithError(err).Warnf("[DEVICE_MANAGER] failed to enumerate %s devices for jid %s", label, nonADJID)
 			firstErr = errors.Join(firstErr, err)
 			return
 		}
+
+		if adJID != "" {
+			// AD JID known: delete precisely the matching companion row(s). In practice
+			// exactly one matches, but do not rely on it -- delete every exact match.
+			for _, dev := range devices {
+				if dev == nil || dev.ID == nil {
+					continue
+				}
+				if dev.ID.String() != adJID {
+					continue
+				}
+				if err := container.DeleteDevice(ctx, dev); err != nil {
+					logrus.WithError(err).Warnf("[DEVICE_MANAGER] failed to delete ad jid %s from %s store", adJID, label)
+					firstErr = errors.Join(firstErr, err)
+				}
+			}
+			return
+		}
+
+		// Legacy path: match by number. Collect every row carrying this number first;
+		// only delete when exactly one row AND one slot claim it (both required -- a lone
+		// surviving row may belong to a different, live slot whose sibling companion was
+		// already evicted).
+		var matches []*store.Device
 		for _, dev := range devices {
 			if dev == nil || dev.ID == nil {
 				continue
 			}
-			if dev.ID.ToNonAD().String() != jid {
-				continue
+			if dev.ID.ToNonAD().String() == nonADJID {
+				matches = append(matches, dev)
 			}
-			if err := container.DeleteDevice(ctx, dev); err != nil {
-				logrus.WithError(err).Warnf("[DEVICE_MANAGER] failed to delete jid %s from %s store", jid, label)
+		}
+		switch {
+		case len(matches) == 0:
+			// nothing to delete
+		case len(matches) == 1 && slotsClaiming <= 1:
+			if err := container.DeleteDevice(ctx, matches[0]); err != nil {
+				logrus.WithError(err).Warnf("[DEVICE_MANAGER] failed to delete jid %s from %s store", nonADJID, label)
 				firstErr = errors.Join(firstErr, err)
 			}
-			break
+		default: // len(matches) > 1
+			logrus.Errorf("[DEVICE_MANAGER] %d store rows carry number %s in %s store and no AD JID is known; refusing to delete any -- run prune-devices after the AD JIDs are backfilled", len(matches), nonADJID, label)
 		}
 	}
 
@@ -206,11 +273,14 @@ func (m *DeviceManager) PurgeDevice(ctx context.Context, deviceID string) error 
 		}
 	}
 
-	// Resolve the device's WhatsApp JID before tearing anything down so we can delete
-	// its whatsmeow store rows by JID even when no live client is attached.
+	// Resolve the device's WhatsApp JID (and full AD JID) before tearing anything down so
+	// we can delete its whatsmeow store rows even when no live client is attached. The AD
+	// JID must be read here, before any reset, because it pins the exact companion row.
 	var jid string
+	var adJID string
 	if inst, ok := m.GetDevice(deviceID); ok && inst != nil {
 		jid = inst.JID()
+		adJID = inst.ADJID()
 		if cli := inst.GetClient(); cli != nil {
 			// The WhatsApp unlink is best-effort: a dead/expired session may fail
 			// here, but that must not block local cleanup or fail the purge.
@@ -229,8 +299,9 @@ func (m *DeviceManager) PurgeDevice(ctx context.Context, deviceID string) error 
 		}
 	}
 
-	// Delete whatsmeow store/keys rows by JID (local cleanup — surfaced on failure).
-	recordErr(m.deleteStoreRowsForJID(ctx, jid))
+	// Delete whatsmeow store/keys rows (local cleanup — surfaced on failure). Prefer the
+	// full AD JID so we delete only this slot's companion, never a sibling's live session.
+	recordErr(m.deleteStoreRowsForJID(ctx, adJID, jid))
 
 	// Remove from registry last
 	m.RemoveDevice(deviceID)
@@ -292,14 +363,17 @@ func (m *DeviceManager) keepSlotLogout(ctx context.Context, deviceID string) err
 		deviceID = inst.ID()
 	}
 
-	// Resolve the JID before resetDeviceKeepSlot clears it, so we can delete the stored
-	// whatsmeow rows even when no live client is attached (slot loaded from storage).
-	// Always delete (don't rely on cli.Logout having done it): an orphan row would
-	// otherwise get matched back on restart. Idempotent when the row is already gone.
+	// Resolve the JID and full AD JID before resetDeviceKeepSlot clears them, so we can
+	// delete the stored whatsmeow rows even when no live client is attached (slot loaded
+	// from storage). Both are read off the (possibly re-resolved above) inst. Always
+	// delete (don't rely on cli.Logout having done it): an orphan row would otherwise get
+	// matched back on restart. Idempotent when the row is already gone. The AD JID, when
+	// known, pins the exact companion so a sibling slot sharing the number is untouched.
 	jid := inst.JID()
+	adJID := inst.ADJID()
 
 	var firstErr error
-	firstErr = errors.Join(firstErr, m.deleteStoreRowsForJID(ctx, jid))
+	firstErr = errors.Join(firstErr, m.deleteStoreRowsForJID(ctx, adJID, jid))
 	firstErr = errors.Join(firstErr, m.resetDeviceKeepSlot(deviceID))
 	return firstErr
 }
