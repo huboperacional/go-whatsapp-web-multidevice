@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/sqlite"
 	"go.mau.fi/whatsmeow/proto/waAdv"
 	"go.mau.fi/whatsmeow/store"
@@ -172,6 +173,14 @@ func TestListDevices_SameCreatedAt(t *testing.T) {
 
 func TestLoadExistingDevicesPreservesStoreJIDForStoreOnlyDevice(t *testing.T) {
 	ctx := context.Background()
+
+	// This exercises the store-only (no slot claims the row) adoption path, which is now
+	// opt-in (default off, to stop the auto-connect churn against dead sessions). Enable it
+	// for the duration of the test and restore the prior value afterwards.
+	prevAdopt := config.WhatsappAdoptOrphanStoreDevices
+	config.WhatsappAdoptOrphanStoreDevices = true
+	t.Cleanup(func() { config.WhatsappAdoptOrphanStoreDevices = prevAdopt })
+
 	storeContainer := newTestSQLStore(t)
 	adJID := types.NewADJID("6281111111111", types.WhatsAppDomain, 12)
 	device := newTestStoreDevice(storeContainer, adJID, "stored-device")
