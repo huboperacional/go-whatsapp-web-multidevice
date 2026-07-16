@@ -4,7 +4,7 @@
     <!-- Required meta tags -->
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="icon" href="{{ .AppBasePath }}/assets/gowa.svg" type="image/svg+xml" sizes="any">
+    <link rel="icon" href="{{ .AppBasePath }}/assets/gowa.png" type="image/png" sizes="any">
     <!-- Same stack as index.html: Fomantic UI 2.8.8, jQuery, DataTables, Vue 3 (CDN), axios, moment -->
     <link rel="stylesheet" type="text/css"
           href="https://cdnjs.cloudflare.com/ajax/libs/fomantic-ui/2.8.8/semantic.min.css">
@@ -270,7 +270,7 @@
 </head>
 <body class="operator-body">
 <div id="splash-screen">
-    <img src="{{ .AppBasePath }}/assets/gowa.svg" alt="GoWA Logo" class="splash-icon" id="main-logo">
+    <img src="{{ .AppBasePath }}/assets/gowa.png" alt="GoWA Logo" class="splash-icon" id="main-logo">
     <h2 class="splash-title">WhatsApp API · Operator</h2>
     <div class="ui active large inline loader splash-spinner"></div>
 </div>
@@ -278,7 +278,7 @@
 <div id="app" style="display: none;">
     <!-- Top bar -->
     <div class="op-topbar">
-        <img src="{{ .AppBasePath }}/assets/gowa.svg" alt="GoWA Logo" class="op-logo">
+        <img src="{{ .AppBasePath }}/assets/gowa.png" alt="GoWA Logo" class="op-logo">
         <span class="op-title">WhatsApp API<span class="op-sub">Operator · [[ appVersion ]]</span></span>
         <span class="op-spacer"></span>
         <button class="ui small button op-topbtn" @click="toggleDark">
