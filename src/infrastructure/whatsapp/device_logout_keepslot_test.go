@@ -23,6 +23,7 @@ type keepSlotStubStorage struct {
 	domainChatStorage.IChatStorageRepository
 	saveErr        error
 	deleteDataErr  error
+	listRecords    []*domainChatStorage.DeviceRecord
 	savedRecords   []*domainChatStorage.DeviceRecord
 	deletedData    []string
 	deletedRecords []string
@@ -44,6 +45,14 @@ func (s *keepSlotStubStorage) DeleteDeviceRecord(deviceID string) error {
 	return nil
 }
 
+// ListDeviceRecords backs the legacy (no-AD-JID) ambiguity guard in deleteStoreRowsForJID.
+// It returns the configured records (nil by default), letting a test model how many slots
+// claim a number: nil keeps slotsClaiming at 0 (unambiguous) and preserves the original
+// by-number delete path, while seeding records simulates one or more slots claiming it.
+func (s *keepSlotStubStorage) ListDeviceRecords() ([]*domainChatStorage.DeviceRecord, error) {
+	return s.listRecords, nil
+}
+
 // assertStoreLacksJID fails if any device row in the container still matches the given
 // NonAD JID. Matching mirrors deleteStoreRowsForJID / LoadExistingDevices.
 func assertStoreLacksJID(t *testing.T, ctx context.Context, c *sqlstore.Container, nonADJID string) {
@@ -57,6 +66,32 @@ func assertStoreLacksJID(t *testing.T, ctx context.Context, c *sqlstore.Containe
 			t.Fatalf("expected store to no longer contain jid %s", nonADJID)
 		}
 	}
+}
+
+// assertStoreLacksADJID fails if any device row in the container still matches the given
+// full AD JID string. Matching is device-precise (dev.ID.String()), so a sibling companion
+// of the same number with a different device suffix is intentionally not matched.
+func assertStoreLacksADJID(t *testing.T, ctx context.Context, c *sqlstore.Container, adJID string) {
+	t.Helper()
+	devices, err := c.GetAllDevices(ctx)
+	if err != nil {
+		t.Fatalf("get all devices: %v", err)
+	}
+	for _, d := range devices {
+		if d != nil && d.ID != nil && d.ID.String() == adJID {
+			t.Fatalf("expected store to no longer contain ad jid %s", adJID)
+		}
+	}
+}
+
+// assertStoreHasADJID fails unless a device row with the given full AD JID string is present.
+func assertStoreHasADJID(t *testing.T, ctx context.Context, c *sqlstore.Container, adJID string) {
+	t.Helper()
+	devices, err := c.GetAllDevices(ctx)
+	if err != nil {
+		t.Fatalf("get all devices: %v", err)
+	}
+	assertStoreHasDevice(t, devices, adJID)
 }
 
 // Scenario: keep-slot logout for a slot that was loaded from storage with NO live
@@ -195,7 +230,7 @@ func TestDeleteStoreRowsForJID_EmptyJIDIsNoOp(t *testing.T) {
 	}
 
 	manager := NewDeviceManager(primaryStore, nil, nil)
-	if err := manager.deleteStoreRowsForJID(ctx, ""); err != nil {
+	if err := manager.deleteStoreRowsForJID(ctx, "", ""); err != nil {
 		t.Fatalf("expected empty-jid no-op, got error: %v", err)
 	}
 
@@ -353,4 +388,193 @@ func TestRemoteLogoutCallback_KeepsSlot(t *testing.T) {
 	}
 	assertStoreLacksJID(t, ctx, primaryStore, nonAD)
 	assertStoreLacksJID(t, ctx, keysStore, nonAD)
+}
+
+// Core precision fix: when the AD JID is known, deleteStoreRowsForJID must remove ONLY that
+// companion's row, leaving a sibling companion of the SAME number (different device suffix)
+// untouched in both the primary and keys stores. This is the guarantee the whole AD-JID work
+// exists for -- the old by-number delete would have destroyed the sibling's live session.
+func TestDeleteStoreRowsForJID_ADJIDDeletesOnlyThatCompanion(t *testing.T) {
+	ctx := context.Background()
+	primaryStore := newTestSQLStore(t)
+	keysStore := newTestSQLStore(t)
+
+	const user = "6281888888881"
+	adJID28 := types.NewADJID(user, types.WhatsAppDomain, 28)
+	adJID32 := types.NewADJID(user, types.WhatsAppDomain, 32)
+	nonAD := adJID32.ToNonAD().String()
+
+	for _, c := range []*sqlstore.Container{primaryStore, keysStore} {
+		if err := newTestStoreDevice(c, adJID28, "companion-28").Save(ctx); err != nil {
+			t.Fatalf("save :28 device: %v", err)
+		}
+		if err := newTestStoreDevice(c, adJID32, "companion-32").Save(ctx); err != nil {
+			t.Fatalf("save :32 device: %v", err)
+		}
+	}
+
+	manager := NewDeviceManager(primaryStore, keysStore, &keepSlotStubStorage{})
+
+	if err := manager.deleteStoreRowsForJID(ctx, adJID32.String(), nonAD); err != nil {
+		t.Fatalf("deleteStoreRowsForJID returned error: %v", err)
+	}
+
+	// :32 gone from both containers; :28 (the sibling) still present in both.
+	assertStoreLacksADJID(t, ctx, primaryStore, adJID32.String())
+	assertStoreLacksADJID(t, ctx, keysStore, adJID32.String())
+	assertStoreHasADJID(t, ctx, primaryStore, adJID28.String())
+	assertStoreHasADJID(t, ctx, keysStore, adJID28.String())
+}
+
+// Legacy path (adJID == ""): safe to delete by number only when exactly one store row AND
+// one slot claim it. Here a single store row and a single claiming slot make the mapping
+// unambiguous, so the row is deleted -- preserving the original by-number behaviour.
+func TestDeleteStoreRowsForJID_LegacySingleRowSingleSlotDeletes(t *testing.T) {
+	ctx := context.Background()
+	primaryStore := newTestSQLStore(t)
+
+	adJID := types.NewADJID("6281888888882", types.WhatsAppDomain, 21)
+	nonAD := adJID.ToNonAD().String()
+	if err := newTestStoreDevice(primaryStore, adJID, "primary").Save(ctx); err != nil {
+		t.Fatalf("save device: %v", err)
+	}
+
+	storage := &keepSlotStubStorage{
+		listRecords: []*domainChatStorage.DeviceRecord{{DeviceID: "slot-a", JID: nonAD}},
+	}
+	manager := NewDeviceManager(primaryStore, nil, storage)
+
+	if err := manager.deleteStoreRowsForJID(ctx, "", nonAD); err != nil {
+		t.Fatalf("deleteStoreRowsForJID returned error: %v", err)
+	}
+	assertStoreLacksJID(t, ctx, primaryStore, nonAD)
+}
+
+// Legacy path, council edge 4: TWO store rows carry the number and no AD JID is known.
+// Even with a single claiming slot, the by-number branch cannot tell which companion row
+// belongs to the slot, so it must refuse and delete nothing (both rows remain).
+func TestDeleteStoreRowsForJID_LegacyMultipleRowsRefuses(t *testing.T) {
+	ctx := context.Background()
+	primaryStore := newTestSQLStore(t)
+
+	const user = "6281888888883"
+	adJID28 := types.NewADJID(user, types.WhatsAppDomain, 28)
+	adJID32 := types.NewADJID(user, types.WhatsAppDomain, 32)
+	nonAD := adJID28.ToNonAD().String()
+	if err := newTestStoreDevice(primaryStore, adJID28, "c28").Save(ctx); err != nil {
+		t.Fatalf("save :28: %v", err)
+	}
+	if err := newTestStoreDevice(primaryStore, adJID32, "c32").Save(ctx); err != nil {
+		t.Fatalf("save :32: %v", err)
+	}
+
+	// slotsClaiming == 1 (passes the up-front guard), but the per-container scan finds two
+	// rows carrying the number -> the delete must refuse.
+	storage := &keepSlotStubStorage{
+		listRecords: []*domainChatStorage.DeviceRecord{{DeviceID: "slot-a", JID: nonAD}},
+	}
+	manager := NewDeviceManager(primaryStore, nil, storage)
+
+	if err := manager.deleteStoreRowsForJID(ctx, "", nonAD); err != nil {
+		t.Fatalf("deleteStoreRowsForJID returned error: %v", err)
+	}
+	assertStoreHasADJID(t, ctx, primaryStore, adJID28.String())
+	assertStoreHasADJID(t, ctx, primaryStore, adJID32.String())
+}
+
+// Legacy path, council edge 4b (the important one): exactly ONE store row carries the number,
+// but TWO slots still register it (a sibling companion was already evicted, only this live
+// row remains). slotsClaiming > 1 must short-circuit the delete so logging out an already
+// evicted slot cannot kill the surviving sibling's live session.
+func TestDeleteStoreRowsForJID_LegacyOneRowButTwoSlotsRefuses(t *testing.T) {
+	ctx := context.Background()
+	primaryStore := newTestSQLStore(t)
+
+	adJID := types.NewADJID("6281888888884", types.WhatsAppDomain, 32)
+	nonAD := adJID.ToNonAD().String()
+	if err := newTestStoreDevice(primaryStore, adJID, "notificador").Save(ctx); err != nil {
+		t.Fatalf("save device: %v", err)
+	}
+
+	storage := &keepSlotStubStorage{
+		listRecords: []*domainChatStorage.DeviceRecord{
+			{DeviceID: "auth-slot", JID: nonAD},
+			{DeviceID: "notificador-slot", JID: nonAD},
+		},
+	}
+	manager := NewDeviceManager(primaryStore, nil, storage)
+
+	if err := manager.deleteStoreRowsForJID(ctx, "", nonAD); err != nil {
+		t.Fatalf("deleteStoreRowsForJID returned error: %v", err)
+	}
+	// The lone live row must survive because two slots still claim the number.
+	assertStoreHasADJID(t, ctx, primaryStore, adJID.String())
+}
+
+// Council edge 4c, weaker (idempotency) variant: the existing harness builds real
+// sqlstore.Container values whose GetAllDevices/DeleteDevice cannot be forced to fail, so a
+// failing keys container cannot be injected. Instead we prove idempotency, which is the
+// property the partial-failure recovery relies on: deleting the AD row removes it on the
+// first call, and a SECOND call is a clean no-op (no panic, no error, primary stays clean).
+func TestDeleteStoreRowsForJID_KeysFailureIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	primaryStore := newTestSQLStore(t)
+	keysStore := newTestSQLStore(t)
+
+	adJID := types.NewADJID("6281888888885", types.WhatsAppDomain, 32)
+	nonAD := adJID.ToNonAD().String()
+	for _, c := range []*sqlstore.Container{primaryStore, keysStore} {
+		if err := newTestStoreDevice(c, adJID, "companion").Save(ctx); err != nil {
+			t.Fatalf("save device: %v", err)
+		}
+	}
+
+	manager := NewDeviceManager(primaryStore, keysStore, &keepSlotStubStorage{})
+
+	if err := manager.deleteStoreRowsForJID(ctx, adJID.String(), nonAD); err != nil {
+		t.Fatalf("first delete returned error: %v", err)
+	}
+	assertStoreLacksADJID(t, ctx, primaryStore, adJID.String())
+	assertStoreLacksADJID(t, ctx, keysStore, adJID.String())
+
+	if err := manager.deleteStoreRowsForJID(ctx, adJID.String(), nonAD); err != nil {
+		t.Fatalf("second (idempotent) delete returned error: %v", err)
+	}
+	assertStoreLacksADJID(t, ctx, primaryStore, adJID.String())
+	assertStoreLacksADJID(t, ctx, keysStore, adJID.String())
+}
+
+// Silent-data-loss fix: two slot records share a NonAD number but map to DIFFERENT
+// companions (distinct AD JIDs :28 and :32). loadFromRegistry must keep BOTH in memory --
+// the AD-JID-aware dedup keeps both records, and the AD-JID-aware existingByJID match must
+// not collapse them (matching on the bare number would evict the first when the second
+// loads). Neither DeviceRecord may be deleted from storage.
+func TestLoadFromRegistryKeepsTwoADDistinctSlots(t *testing.T) {
+	const user = "6281888888886"
+	adJID28 := types.NewADJID(user, types.WhatsAppDomain, 28)
+	adJID32 := types.NewADJID(user, types.WhatsAppDomain, 32)
+	nonAD := adJID28.ToNonAD().String()
+
+	storage := &keepSlotStubStorage{}
+	manager := NewDeviceManager(nil, nil, storage)
+
+	records := []*domainChatStorage.DeviceRecord{
+		{DeviceID: "auth-slot", DisplayName: "Auth", JID: nonAD, DeviceJID: adJID28.String()},
+		{DeviceID: "notificador-slot", DisplayName: "Notificador", JID: nonAD, DeviceJID: adJID32.String()},
+	}
+
+	manager.loadFromRegistry(records)
+
+	if _, ok := manager.GetDevice("auth-slot"); !ok {
+		t.Fatal("expected auth-slot (:28) to remain registered after loadFromRegistry")
+	}
+	if _, ok := manager.GetDevice("notificador-slot"); !ok {
+		t.Fatal("expected notificador-slot (:32) to remain registered after loadFromRegistry")
+	}
+
+	// No record may be deleted: reconciliation drops in-memory duplicates only, never
+	// persisted slots. keepSlotStubStorage records every DeleteDeviceRecord call.
+	if len(storage.deletedRecords) != 0 {
+		t.Fatalf("expected no DeleteDeviceRecord calls, got %v", storage.deletedRecords)
+	}
 }

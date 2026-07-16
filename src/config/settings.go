@@ -37,20 +37,25 @@ var (
 	WhatsappWebhookEvents             []string         // Whitelist of events to forward to webhook (empty = all events)
 	WhatsappWebhookIgnoreJids         []string         // JIDs (or "@g.us"/"@s.whatsapp.net"/"@lid" wildcards) to skip when forwarding to webhooks
 	WhatsappAutoRejectCall                     = false // Auto-reject incoming calls
-	WhatsappLogLevel                           = "ERROR"
-	WhatsappSettingMaxImageSize       int64    = 20000000  // 20MB
-	WhatsappSettingMaxFileSize        int64    = 50000000  // 50MB
-	WhatsappSettingMaxVideoSize       int64    = 100000000 // 100MB
-	WhatsappSettingMaxDownloadSize    int64    = 500000000 // 500MB
-	WhatsappTypeUser                           = "@s.whatsapp.net"
-	WhatsappTypeGroup                          = "@g.us"
-	WhatsappTypeLid                            = "@lid"
-	WhatsappTypeNewsletter                     = "@newsletter"
-	WhatsappAccountValidation                  = true
-	WhatsappPresenceOnConnect                  = "unavailable" // Presence to send on connect: "available", "unavailable", or "none"
-	WhatsappPresencePulseEnabled               = true          // Periodically pulse presence available, then unavailable
-	WhatsappPresencePulseInterval              = 24 * time.Hour
-	WhatsappPresencePulseDuration              = 5 * time.Minute
+	// WhatsappAdoptOrphanStoreDevices, when true, restores the legacy behaviour of
+	// registering an in-memory device for every whatsmeow store row that no slot
+	// claims (and then auto-dialling it). That produced endless reconnect churn
+	// against dead sessions, so it now defaults to false: unclaimed rows are skipped.
+	WhatsappAdoptOrphanStoreDevices       = false
+	WhatsappLogLevel                      = "ERROR"
+	WhatsappSettingMaxImageSize     int64 = 20000000  // 20MB
+	WhatsappSettingMaxFileSize      int64 = 50000000  // 50MB
+	WhatsappSettingMaxVideoSize     int64 = 100000000 // 100MB
+	WhatsappSettingMaxDownloadSize  int64 = 500000000 // 500MB
+	WhatsappTypeUser                      = "@s.whatsapp.net"
+	WhatsappTypeGroup                     = "@g.us"
+	WhatsappTypeLid                       = "@lid"
+	WhatsappTypeNewsletter                = "@newsletter"
+	WhatsappAccountValidation             = true
+	WhatsappPresenceOnConnect             = "unavailable" // Presence to send on connect: "available", "unavailable", or "none"
+	WhatsappPresencePulseEnabled          = true          // Periodically pulse presence available, then unavailable
+	WhatsappPresencePulseInterval         = 24 * time.Hour
+	WhatsappPresencePulseDuration         = 5 * time.Minute
 
 	// WhatsappProxy is forwarded to whatsmeow's *Client.SetProxyAddress before
 	// Connect. Accepts SOCKS5/HTTP/HTTPS schemes, e.g.

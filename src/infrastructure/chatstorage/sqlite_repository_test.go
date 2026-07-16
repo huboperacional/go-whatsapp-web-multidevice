@@ -333,6 +333,75 @@ func TestSQLiteRepositoryStoresBatchMessageDirectPath(t *testing.T) {
 	}
 }
 
+func TestSQLiteRepositoryDeviceRecordADJIDRoundTrip(t *testing.T) {
+	repo := newTestSQLiteRepository(t)
+
+	const (
+		deviceID = "auth-slot"
+		jid      = "6281777777777@s.whatsapp.net"
+		adJID    = "6281777777777:32@s.whatsapp.net"
+	)
+
+	if err := repo.SaveDeviceRecord(&domainChatStorage.DeviceRecord{
+		DeviceID:    deviceID,
+		DisplayName: "Auth",
+		JID:         jid,
+		DeviceJID:   adJID,
+	}); err != nil {
+		t.Fatalf("save device record: %v", err)
+	}
+
+	byID, err := repo.GetDeviceRecord(deviceID)
+	if err != nil {
+		t.Fatalf("get device record: %v", err)
+	}
+	if byID == nil || byID.DeviceJID != adJID {
+		t.Fatalf("GetDeviceRecord DeviceJID = %v, want %q", byID, adJID)
+	}
+
+	byJID, err := repo.GetDeviceRecordByJID(jid)
+	if err != nil {
+		t.Fatalf("get device record by jid: %v", err)
+	}
+	if byJID == nil || byJID.DeviceJID != adJID {
+		t.Fatalf("GetDeviceRecordByJID DeviceJID = %v, want %q", byJID, adJID)
+	}
+
+	listed, err := repo.ListDeviceRecords()
+	if err != nil {
+		t.Fatalf("list device records: %v", err)
+	}
+	var found bool
+	for _, rec := range listed {
+		if rec.DeviceID == deviceID {
+			found = true
+			if rec.DeviceJID != adJID {
+				t.Fatalf("ListDeviceRecords DeviceJID = %q, want %q", rec.DeviceJID, adJID)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected %s in ListDeviceRecords", deviceID)
+	}
+
+	// A legacy record saved with no AD JID must read back as "" (not an error).
+	if err := repo.SaveDeviceRecord(&domainChatStorage.DeviceRecord{
+		DeviceID:    "legacy-slot",
+		DisplayName: "Legacy",
+		JID:         "6281666666666@s.whatsapp.net",
+		DeviceJID:   "",
+	}); err != nil {
+		t.Fatalf("save legacy device record: %v", err)
+	}
+	legacy, err := repo.GetDeviceRecord("legacy-slot")
+	if err != nil {
+		t.Fatalf("get legacy device record: %v", err)
+	}
+	if legacy == nil || legacy.DeviceJID != "" {
+		t.Fatalf("expected legacy DeviceJID to read back empty, got %v", legacy)
+	}
+}
+
 func seedChatMessage(t *testing.T, repo *SQLiteRepository, deviceID, chatJID, messageID, content string, timestamp time.Time) {
 	t.Helper()
 	if err := repo.StoreChat(&domainChatStorage.Chat{

@@ -160,6 +160,9 @@ func initEnvConfig() {
 	if viper.IsSet("whatsapp_auto_reject_call") {
 		config.WhatsappAutoRejectCall = viper.GetBool("whatsapp_auto_reject_call")
 	}
+	if viper.IsSet("whatsapp_adopt_orphan_store_devices") {
+		config.WhatsappAdoptOrphanStoreDevices = viper.GetBool("whatsapp_adopt_orphan_store_devices")
+	}
 	if envPresenceOnConnect := viper.GetString("whatsapp_presence_on_connect"); envPresenceOnConnect != "" {
 		config.WhatsappPresenceOnConnect = envPresenceOnConnect
 	}
@@ -391,6 +394,12 @@ func initFlags() {
 		"auto-reject-call", "",
 		config.WhatsappAutoRejectCall,
 		`auto reject incoming calls --auto-reject-call <true/false> | example: --auto-reject-call=true`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.WhatsappAdoptOrphanStoreDevices,
+		"adopt-orphan-store-devices", "",
+		config.WhatsappAdoptOrphanStoreDevices,
+		`adopt and auto-dial whatsmeow store rows not claimed by any slot (legacy; causes reconnect churn against dead sessions) --adopt-orphan-store-devices <true/false> | example: --adopt-orphan-store-devices=true`,
 	)
 	rootCmd.PersistentFlags().StringVarP(
 		&config.WhatsappPresenceOnConnect,

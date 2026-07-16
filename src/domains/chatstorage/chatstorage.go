@@ -100,23 +100,24 @@ type MediaInfo struct {
 
 // DeviceRecord tracks a registered device for persistence purposes.
 type DeviceRecord struct {
-	DeviceID                 string    `db:"device_id"`
-	DisplayName              string    `db:"display_name"`
-	JID                      string    `db:"jid"`
-	WebhookURL               *string   `db:"webhook_url"`
-	WebhookSecret            string    `db:"webhook_secret"`
-	WebhookEvents            string    `db:"webhook_events"`
+	DeviceID                  string    `db:"device_id"`
+	DisplayName               string    `db:"display_name"`
+	JID                       string    `db:"jid"`
+	DeviceJID                 string    `db:"device_jid"` // full AD JID (e.g. 5567...:32@s.whatsapp.net); "" = legacy/unknown, backfilled on next connect
+	WebhookURL                *string   `db:"webhook_url"`
+	WebhookSecret             string    `db:"webhook_secret"`
+	WebhookEvents             string    `db:"webhook_events"`
 	WebhookInsecureSkipVerify bool      `db:"webhook_insecure_skip_verify"`
-	CreatedAt                time.Time `db:"created_at"`
-	UpdatedAt                time.Time `db:"updated_at"`
+	CreatedAt                 time.Time `db:"created_at"`
+	UpdatedAt                 time.Time `db:"updated_at"`
 }
 
 // DeviceWebhookConfig holds the complete webhook configuration for a device.
 type DeviceWebhookConfig struct {
-	WebhookURL               *string `json:"webhook_url,omitempty"`
-	WebhookSecret           string  `json:"webhook_secret,omitempty"`
-	WebhookEvents           string  `json:"webhook_events,omitempty"`
-	WebhookInsecureSkipVerify bool   `json:"webhook_insecure_skip_verify,omitempty"`
+	WebhookURL                *string `json:"webhook_url,omitempty"`
+	WebhookSecret             string  `json:"webhook_secret,omitempty"`
+	WebhookEvents             string  `json:"webhook_events,omitempty"`
+	WebhookInsecureSkipVerify bool    `json:"webhook_insecure_skip_verify,omitempty"`
 }
 
 // MessageFilter represents query filters for messages

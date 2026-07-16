@@ -39,7 +39,7 @@ func syncKeysDevice(ctx context.Context, db, keysDB *sqlstore.Container, jid typ
 		return
 	}
 
-	dev, err := findStoreDeviceByJID(ctx, db, jid)
+	dev, err := findStoreDeviceByADJID(ctx, db, jid)
 	if err != nil {
 		log.Errorf("Failed to find device for keys sync: %v", err)
 		return

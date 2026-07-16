@@ -56,6 +56,7 @@ func (m *DeviceManager) AddDevice(instance *DeviceInstance) {
 			DeviceID:    instance.ID(),
 			DisplayName: instance.DisplayName(),
 			JID:         instance.JID(),
+			DeviceJID:   instance.ADJID(),
 			CreatedAt:   instance.CreatedAt(),
 			UpdatedAt:   time.Now(),
 		})
@@ -148,16 +149,53 @@ func (m *DeviceManager) RemoveDevice(id string) {
 	}
 }
 
-// deleteStoreRowsForJID removes the whatsmeow device rows (primary + keys containers)
-// whose JID matches jid. Matching uses the NonAD form to mirror LoadExistingDevices,
-// where the devices table stores NonAD JIDs. It is idempotent — a row that is already
-// gone is simply not found — and an empty jid is a no-op (a slot that was never paired
-// has no store rows to delete).
-func (m *DeviceManager) deleteStoreRowsForJID(ctx context.Context, jid string) error {
-	if strings.TrimSpace(jid) == "" {
+// deleteStoreRowsForJID removes the whatsmeow session rows for a slot's companion.
+//
+// When adJID is known it identifies exactly one companion, so we delete precisely
+// that row (a number can host several companions -- deleting by number alone can
+// destroy a different, live slot's session).
+//
+// When adJID is empty (legacy rows written before the AD JID was tracked) we can
+// only match by number. That is safe ONLY when the mapping is unambiguous: exactly
+// one store row carries the number AND exactly one slot claims it. Otherwise we
+// delete nothing and log loudly -- never guess. Run the prune-devices command to
+// clean such numbers up once the AD JIDs have been backfilled.
+//
+// An empty nonADJID is a no-op (a slot that was never paired has no rows).
+func (m *DeviceManager) deleteStoreRowsForJID(ctx context.Context, adJID, nonADJID string) error {
+	if strings.TrimSpace(nonADJID) == "" && strings.TrimSpace(adJID) == "" {
 		return nil
 	}
 
+	// Legacy ambiguity guard: with no AD JID we can only match by number, so resolve how
+	// many slots claim this number ONCE, up front. If more than one slot claims it we must
+	// not guess which companion row belongs to which slot -- deleting the wrong one would
+	// destroy a different, live session. Computed only on the legacy path so the hot
+	// (AD JID known) path never pays the ListDeviceRecords cost.
+	slotsClaiming := 0
+	if adJID == "" {
+		if m.storage != nil {
+			records, err := m.storage.ListDeviceRecords()
+			if err != nil {
+				logrus.WithError(err).Errorf("[DEVICE_MANAGER] cannot resolve slot ownership for number %s; refusing to delete store rows", nonADJID)
+				return err
+			}
+			for _, rec := range records {
+				if rec != nil && rec.JID == nonADJID {
+					slotsClaiming++
+				}
+			}
+		}
+		if slotsClaiming > 1 {
+			logrus.Errorf("[DEVICE_MANAGER] %d slots claim number %s and no AD JID is known; refusing to delete any whatsmeow rows -- run prune-devices after the AD JIDs are backfilled", slotsClaiming, nonADJID)
+			return nil
+		}
+	}
+
+	// There is no cross-container transaction: a failure deleting from one container can
+	// leave a row in the other. That is acceptable because the function is idempotent -- a
+	// retry, or prune-devices, cleans the remainder, and the per-container log line names
+	// which container was left dirty.
 	var firstErr error
 	deleteFrom := func(container *sqlstore.Container, label string) {
 		if container == nil {
@@ -165,22 +203,52 @@ func (m *DeviceManager) deleteStoreRowsForJID(ctx context.Context, jid string) e
 		}
 		devices, err := container.GetAllDevices(ctx)
 		if err != nil {
-			logrus.WithError(err).Warnf("[DEVICE_MANAGER] failed to enumerate %s devices for jid %s", label, jid)
+			logrus.WithError(err).Warnf("[DEVICE_MANAGER] failed to enumerate %s devices for jid %s", label, nonADJID)
 			firstErr = errors.Join(firstErr, err)
 			return
 		}
+
+		if adJID != "" {
+			// AD JID known: delete precisely the matching companion row(s). In practice
+			// exactly one matches, but do not rely on it -- delete every exact match.
+			for _, dev := range devices {
+				if dev == nil || dev.ID == nil {
+					continue
+				}
+				if dev.ID.String() != adJID {
+					continue
+				}
+				if err := container.DeleteDevice(ctx, dev); err != nil {
+					logrus.WithError(err).Warnf("[DEVICE_MANAGER] failed to delete ad jid %s from %s store", adJID, label)
+					firstErr = errors.Join(firstErr, err)
+				}
+			}
+			return
+		}
+
+		// Legacy path: match by number. Collect every row carrying this number first;
+		// only delete when exactly one row AND one slot claim it (both required -- a lone
+		// surviving row may belong to a different, live slot whose sibling companion was
+		// already evicted).
+		var matches []*store.Device
 		for _, dev := range devices {
 			if dev == nil || dev.ID == nil {
 				continue
 			}
-			if dev.ID.ToNonAD().String() != jid {
-				continue
+			if dev.ID.ToNonAD().String() == nonADJID {
+				matches = append(matches, dev)
 			}
-			if err := container.DeleteDevice(ctx, dev); err != nil {
-				logrus.WithError(err).Warnf("[DEVICE_MANAGER] failed to delete jid %s from %s store", jid, label)
+		}
+		switch {
+		case len(matches) == 0:
+			// nothing to delete
+		case len(matches) == 1 && slotsClaiming <= 1:
+			if err := container.DeleteDevice(ctx, matches[0]); err != nil {
+				logrus.WithError(err).Warnf("[DEVICE_MANAGER] failed to delete jid %s from %s store", nonADJID, label)
 				firstErr = errors.Join(firstErr, err)
 			}
-			break
+		default: // len(matches) > 1
+			logrus.Errorf("[DEVICE_MANAGER] %d store rows carry number %s in %s store and no AD JID is known; refusing to delete any -- run prune-devices after the AD JIDs are backfilled", len(matches), nonADJID, label)
 		}
 	}
 
@@ -205,11 +273,14 @@ func (m *DeviceManager) PurgeDevice(ctx context.Context, deviceID string) error 
 		}
 	}
 
-	// Resolve the device's WhatsApp JID before tearing anything down so we can delete
-	// its whatsmeow store rows by JID even when no live client is attached.
+	// Resolve the device's WhatsApp JID (and full AD JID) before tearing anything down so
+	// we can delete its whatsmeow store rows even when no live client is attached. The AD
+	// JID must be read here, before any reset, because it pins the exact companion row.
 	var jid string
+	var adJID string
 	if inst, ok := m.GetDevice(deviceID); ok && inst != nil {
 		jid = inst.JID()
+		adJID = inst.ADJID()
 		if cli := inst.GetClient(); cli != nil {
 			// The WhatsApp unlink is best-effort: a dead/expired session may fail
 			// here, but that must not block local cleanup or fail the purge.
@@ -228,8 +299,9 @@ func (m *DeviceManager) PurgeDevice(ctx context.Context, deviceID string) error 
 		}
 	}
 
-	// Delete whatsmeow store/keys rows by JID (local cleanup — surfaced on failure).
-	recordErr(m.deleteStoreRowsForJID(ctx, jid))
+	// Delete whatsmeow store/keys rows (local cleanup — surfaced on failure). Prefer the
+	// full AD JID so we delete only this slot's companion, never a sibling's live session.
+	recordErr(m.deleteStoreRowsForJID(ctx, adJID, jid))
 
 	// Remove from registry last
 	m.RemoveDevice(deviceID)
@@ -291,14 +363,17 @@ func (m *DeviceManager) keepSlotLogout(ctx context.Context, deviceID string) err
 		deviceID = inst.ID()
 	}
 
-	// Resolve the JID before resetDeviceKeepSlot clears it, so we can delete the stored
-	// whatsmeow rows even when no live client is attached (slot loaded from storage).
-	// Always delete (don't rely on cli.Logout having done it): an orphan row would
-	// otherwise get matched back on restart. Idempotent when the row is already gone.
+	// Resolve the JID and full AD JID before resetDeviceKeepSlot clears them, so we can
+	// delete the stored whatsmeow rows even when no live client is attached (slot loaded
+	// from storage). Both are read off the (possibly re-resolved above) inst. Always
+	// delete (don't rely on cli.Logout having done it): an orphan row would otherwise get
+	// matched back on restart. Idempotent when the row is already gone. The AD JID, when
+	// known, pins the exact companion so a sibling slot sharing the number is untouched.
 	jid := inst.JID()
+	adJID := inst.ADJID()
 
 	var firstErr error
-	firstErr = errors.Join(firstErr, m.deleteStoreRowsForJID(ctx, jid))
+	firstErr = errors.Join(firstErr, m.deleteStoreRowsForJID(ctx, adJID, jid))
 	firstErr = errors.Join(firstErr, m.resetDeviceKeepSlot(deviceID))
 	return firstErr
 }
@@ -319,8 +394,11 @@ func (m *DeviceManager) resetDeviceKeepSlot(deviceID string) error {
 			DeviceID:    deviceID,
 			DisplayName: inst.DisplayName(),
 			JID:         "",
-			CreatedAt:   inst.CreatedAt(),
-			UpdatedAt:   time.Now(),
+			// On logout the slot no longer maps to any companion, so clear the
+			// AD JID together with the JID.
+			DeviceJID: "",
+			CreatedAt: inst.CreatedAt(),
+			UpdatedAt: time.Now(),
 		}); err != nil {
 			return fmt.Errorf("persist logged-out device %s: %w", deviceID, err)
 		}
@@ -354,6 +432,7 @@ func (m *DeviceManager) CreateDevice(ctx context.Context, requestedID string) (*
 			DeviceID:    id,
 			DisplayName: instance.DisplayName(),
 			JID:         instance.JID(),
+			DeviceJID:   instance.ADJID(),
 			CreatedAt:   instance.CreatedAt(),
 			UpdatedAt:   instance.CreatedAt(),
 		}); err != nil {
@@ -415,6 +494,18 @@ func (m *DeviceManager) LoadExistingDevices(ctx context.Context) error {
 	}
 
 	logrus.Infof("[DEVICE_MANAGER] discovered %d device records in store", len(devices))
+
+	// A number can host several companions. Count them up front so we only ever bind a
+	// slot to a store row when the mapping is unambiguous -- binding the wrong companion
+	// would hand two slots the same session.
+	rowsPerNumber := make(map[string]int, len(devices))
+	for _, dev := range devices {
+		if dev == nil || dev.ID == nil {
+			continue
+		}
+		rowsPerNumber[dev.ID.ToNonAD().String()]++
+	}
+
 	for _, dev := range devices {
 		if dev == nil || dev.ID == nil {
 			continue
@@ -440,42 +531,61 @@ func (m *DeviceManager) LoadExistingDevices(ctx context.Context) error {
 
 		// Skip if already matched
 		if existingByID != nil {
-			m.applyStoreJID(existingByID, jid)
+			m.applyStoreJID(existingByID, jid, dev.ID.String())
 			continue
 		}
 		if matchedDevice != nil {
+			// Legacy slot (no AD JID persisted yet): adopt this row's AD JID so the slot keeps
+			// driving its existing companion instead of minting a new one on the next connect.
+			// Only safe when exactly one row carries the number.
+			if matchedDevice.ADJID() == "" {
+				if rowsPerNumber[jid] == 1 {
+					m.applyStoreJID(matchedDevice, jid, dev.ID.String())
+				} else {
+					logrus.Warnf("[DEVICE_MANAGER] %d companions carry number %s; cannot infer which belongs to slot %s -- it will require a fresh pairing (run prune-devices to clean up)", rowsPerNumber[jid], jid, matchedDevice.ID())
+				}
+			}
 			continue
 		}
 
 		// Match orphaned device with this JID
 		if orphanDevice != nil {
 			logrus.Infof("[DEVICE_MANAGER] matching orphaned device %s with JID %s", orphanDevice.ID(), jid)
-			m.applyStoreJID(orphanDevice, jid)
+			m.applyStoreJID(orphanDevice, jid, dev.ID.String())
 			if m.storage != nil {
 				_ = m.storage.SaveDeviceRecord(&domainChatStorage.DeviceRecord{
-					DeviceID: orphanDevice.ID(),
-					JID:      jid,
+					DeviceID:  orphanDevice.ID(),
+					JID:       jid,
+					DeviceJID: dev.ID.String(),
 				})
 			}
 			continue
 		}
 
-		// Create new device instance
+		// Create new device instance for a store row that no slot claims. By default we
+		// do NOT: adopting it registers an instance that the auto-connect loop then dials
+		// forever against a dead session (endless websocket close 1005 churn). Opt back
+		// into the legacy behaviour with WHATSAPP_ADOPT_ORPHAN_STORE_DEVICES=true.
+		if !config.WhatsappAdoptOrphanStoreDevices {
+			logrus.Warnf("[DEVICE_MANAGER] store row %s is not claimed by any slot; skipping adoption (set WHATSAPP_ADOPT_ORPHAN_STORE_DEVICES=true to restore the old behaviour). Run prune-devices to clean it up.", jid)
+			continue
+		}
 		instance := NewDeviceInstance(jid, nil, newDeviceChatStorage(jid, m.storage))
 		instance.SetState(domainDevice.DeviceStateDisconnected)
-		m.applyStoreJID(instance, jid)
+		m.applyStoreJID(instance, jid, dev.ID.String())
 		m.AddDevice(instance)
 	}
 
 	return nil
 }
 
-func (m *DeviceManager) applyStoreJID(instance *DeviceInstance, jid string) {
+func (m *DeviceManager) applyStoreJID(instance *DeviceInstance, jid, adJID string) {
 	if instance == nil || jid == "" {
 		return
 	}
 	instance.mu.Lock()
 	instance.jid = jid
+	instance.adJID = adJID
 	instance.mu.Unlock()
 	instance.SetChatStorage(newDeviceChatStorage(jid, m.storage))
 }
@@ -493,36 +603,62 @@ func (m *DeviceManager) loadFromRegistry(records []*domainChatStorage.DeviceReco
 		}
 	}
 
-	// Load devices, removing auto-created duplicates
-	seenJIDs := make(map[string]bool)
+	// Load devices, skipping (never deleting) auto-created and duplicate records.
+	// Dedup keys on the full AD JID when known so two genuine companions of the same
+	// number both load; only un-backfilled legacy rows fall back to NonAD dedup.
+	seenADJIDs := make(map[string]bool)
+	seenNonADJIDs := make(map[string]bool)
 	for _, rec := range records {
 		if rec == nil || strings.TrimSpace(rec.DeviceID) == "" {
 			continue
 		}
 
-		// Skip auto-created devices if manual device with same JID exists
+		// Skip (do NOT delete) auto-created devices when a manual slot already claims
+		// the same JID. Deleting a persisted slot record during startup reconciliation
+		// is silent data loss; record deletion belongs to RemoveDevice/PurgeDevice only.
 		isAutoCreated := strings.Contains(rec.DeviceID, "@")
 		if isAutoCreated && manualDeviceJIDs[rec.DeviceID] {
-			logrus.Warnf("[DEVICE_MANAGER] removing auto-created device %s", rec.DeviceID)
-			_ = m.storage.DeleteDeviceRecord(rec.DeviceID)
+			logrus.Warnf("[DEVICE_MANAGER] skipping (not deleting) auto-created device %s: a manual slot already claims its JID", rec.DeviceID)
 			continue
 		}
 
-		// Skip duplicate JIDs
-		if rec.JID != "" {
-			if seenJIDs[rec.JID] {
-				logrus.Warnf("[DEVICE_MANAGER] removing duplicate JID device %s", rec.DeviceID)
-				_ = m.storage.DeleteDeviceRecord(rec.DeviceID)
+		// Skip duplicates. Prefer the full AD JID: a true duplicate is only the same
+		// companion appearing twice. Legacy records with no AD JID fall back to NonAD
+		// dedup, preserving today's behaviour until backfill disambiguates them.
+		if rec.DeviceJID != "" {
+			if seenADJIDs[rec.DeviceJID] {
+				logrus.Warnf("[DEVICE_MANAGER] skipping (not deleting) duplicate AD JID device %s", rec.DeviceID)
 				continue
 			}
-			seenJIDs[rec.JID] = true
+			seenADJIDs[rec.DeviceJID] = true
+		} else if rec.JID != "" {
+			if seenNonADJIDs[rec.JID] {
+				logrus.Warnf("[DEVICE_MANAGER] skipping (not deleting) device %s: its number collides with another un-backfilled record; backfilling the AD JID will disambiguate it", rec.DeviceID)
+				continue
+			}
+			seenNonADJIDs[rec.JID] = true
 		}
 
-		// Check if a device with this JID already exists in memory (from InitWaCLI)
+		// Check if the same session already exists in memory under a different id (e.g.
+		// bootstrapped by InitWaCLI) so we can replace it with this registry slot and
+		// transfer its live client. Match on the full AD JID when known -- matching on the
+		// bare number would collapse two distinct companions of the same number into one.
+		// Legacy records with no AD JID fall back to the number (unambiguous only until
+		// backfill; the same limitation the dedup above carries).
 		m.mu.RLock()
 		var existingByJID *DeviceInstance
 		for id, inst := range m.devices {
-			if rec.JID != "" && inst.JID() == rec.JID && id != rec.DeviceID {
+			if id == rec.DeviceID {
+				continue
+			}
+			if rec.DeviceJID != "" {
+				if inst.ADJID() == rec.DeviceJID {
+					existingByJID = inst
+					break
+				}
+				continue
+			}
+			if rec.JID != "" && inst.JID() == rec.JID {
 				existingByJID = inst
 				break
 			}
@@ -546,6 +682,7 @@ func (m *DeviceManager) loadFromRegistry(records []*domainChatStorage.DeviceReco
 		instance.SetState(domainDevice.DeviceStateDisconnected)
 		instance.displayName = rec.DisplayName
 		instance.jid = rec.JID
+		instance.adJID = rec.DeviceJID
 
 		// If we had an existing device with client, transfer the client
 		if existingByJID != nil {
@@ -690,35 +827,59 @@ func (m *DeviceManager) getOrCreateStoreDevice(ctx context.Context, deviceID str
 		return nil, fmt.Errorf("store container is nil")
 	}
 
-	// Try to reuse an existing device record if the ID maps to a JID.
+	// Reuse an existing session row ONLY when we can identify the exact companion by
+	// its full AD JID. Resolving by the bare number would risk adopting a sibling
+	// slot's live session (a number can host several companions).
 	if deviceID != "" {
-		if jid, err := types.ParseJID(deviceID); err == nil {
-			if dev, err := findStoreDeviceByJID(ctx, m.store, jid); err != nil {
+		// Case 1: deviceID itself parses as an AD JID (has a non-zero device/agent
+		// part, so parsed.String() differs from its NonAD form).
+		if parsed, err := types.ParseJID(deviceID); err == nil && parsed.String() != parsed.ToNonAD().String() {
+			if dev, err := findStoreDeviceByADJID(ctx, m.store, parsed); err != nil {
 				return nil, err
 			} else if dev != nil {
 				return dev, nil
 			}
 		}
 
-		// If deviceID is not a valid JID, look up the device instance and use its JID
+		// Case 2: deviceID is an opaque slot id -- look up the in-memory instance and
+		// use its recorded AD JID (never its NonAD JID).
 		m.mu.RLock()
-		var instJID string
-		if inst, ok := m.devices[deviceID]; ok && inst.JID() != "" {
-			instJID = inst.JID()
+		var instADJID string
+		var instNonAD string
+		if inst, ok := m.devices[deviceID]; ok {
+			instADJID = inst.ADJID()
+			instNonAD = inst.JID()
 		}
 		m.mu.RUnlock()
 
-		if instJID != "" {
-			if jid, err := types.ParseJID(instJID); err == nil {
-				if dev, err := findStoreDeviceByJID(ctx, m.store, jid); err != nil {
+		if instADJID != "" {
+			if jid, err := types.ParseJID(instADJID); err == nil {
+				if dev, err := findStoreDeviceByADJID(ctx, m.store, jid); err != nil {
 					return nil, err
 				} else if dev != nil {
 					return dev, nil
 				}
 			}
 		}
+
+		// Last resort before minting: resolve by the best-known bare number, but only
+		// when exactly one store row carries it. Prefer the number parsed from deviceID
+		// (when it is itself a JID); otherwise fall back to the in-memory instance's JID.
+		nonAD := instNonAD
+		if parsed, err := types.ParseJID(deviceID); err == nil && parsed.User != "" {
+			nonAD = parsed.ToNonAD().String()
+		}
+		if strings.TrimSpace(nonAD) != "" {
+			if dev, err := findStoreDeviceByUniqueNumber(ctx, m.store, nonAD); err != nil {
+				return nil, err
+			} else if dev != nil {
+				return dev, nil
+			}
+		}
 	}
 
+	// Unknown or ambiguous mapping: deliberately mint a fresh companion (a new QR)
+	// rather than adopting a sibling slot's session row.
 	return m.store.NewDevice(), nil
 }
 
@@ -734,29 +895,52 @@ func (m *DeviceManager) configureKeysStore(ctx context.Context, device *store.De
 	return nil
 }
 
-func findStoreDeviceByJID(ctx context.Context, container *sqlstore.Container, jid types.JID) (*store.Device, error) {
-	if container == nil || jid.IsEmpty() {
+// findStoreDeviceByADJID returns the whatsmeow session row for exactly one companion.
+//
+// It matches on the full AD JID. Matching on the bare number is unsafe: a number can
+// host several companions, and adopting a row that belongs to a different slot would
+// hand two slots the same session.
+func findStoreDeviceByADJID(ctx context.Context, container *sqlstore.Container, adJID types.JID) (*store.Device, error) {
+	if container == nil || adJID.IsEmpty() {
 		return nil, nil
 	}
 
-	if dev, err := container.GetDevice(ctx, jid); err != nil {
+	if dev, err := container.GetDevice(ctx, adJID); err != nil {
 		return nil, err
 	} else if dev != nil {
 		return dev, nil
 	}
+	return nil, nil
+}
 
+// findStoreDeviceByUniqueNumber resolves a companion from a bare (NonAD) number.
+//
+// A number can host several companions, so this only succeeds when exactly one store
+// row carries it. When several do, the mapping is ambiguous and we return nil rather
+// than adopt a row that may belong to a different, live slot.
+func findStoreDeviceByUniqueNumber(ctx context.Context, container *sqlstore.Container, nonADJID string) (*store.Device, error) {
+	if container == nil || strings.TrimSpace(nonADJID) == "" {
+		return nil, nil
+	}
 	devices, err := container.GetAllDevices(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	targetJID := jid.ToNonAD().String()
+	var match *store.Device
 	for _, dev := range devices {
-		if dev != nil && dev.ID != nil && dev.ID.ToNonAD().String() == targetJID {
-			return dev, nil
+		if dev == nil || dev.ID == nil {
+			continue
 		}
+		if dev.ID.ToNonAD().String() != nonADJID {
+			continue
+		}
+		if match != nil {
+			logrus.Warnf("[DEVICE_MANAGER] several companions carry number %s; refusing to guess which one to reuse -- a fresh pairing will be created", nonADJID)
+			return nil, nil
+		}
+		match = dev
 	}
-	return nil, nil
+	return match, nil
 }
 
 func configureDeviceProps() {
